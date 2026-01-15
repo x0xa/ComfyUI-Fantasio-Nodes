@@ -4,6 +4,7 @@ import boto3
 import numpy as np
 from PIL import Image
 from botocore.config import Config
+from concurrent.futures import ThreadPoolExecutor
 from server import PromptServer
 
 
@@ -51,17 +52,22 @@ class SaveWebPToS3:
             region_name='auto'
         )
 
-        for idx, image_tensor in enumerate(images):
-            self._process_single_image(
-                s3, image_tensor, idx,
-                quality, thumb_quality, thumb_size,
-                s3_bucket, s3_public_url, client_id
-            )
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(
+                    self._process_single_image,
+                    s3, image_tensor, idx,
+                    quality, thumb_quality, thumb_size,
+                    s3_bucket, s3_public_url, client_id
+                )
+                for idx, image_tensor in enumerate(images)
+            ]
+            for future in futures:
+                future.result()
 
         return {"ui": {"images": []}}
 
-    def _process_single_image(self, s3, image_tensor, idx, quality, thumb_quality,
-                               thumb_size, bucket, public_url, client_id):
+    def _process_single_image(self, s3, image_tensor, idx, quality, thumb_quality, thumb_size, bucket, public_url, client_id):
         sid = client_id if client_id else None
 
         img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
@@ -69,37 +75,50 @@ class SaveWebPToS3:
 
         filename = str(uuid.uuid4())
         orientation = self._get_orientation(img.width, img.height)
-
-        main_buffer = io.BytesIO()
-        img.save(main_buffer, format='WEBP', quality=quality, method=4)
         main_key = f"generated/originals/{orientation}/{filename}.webp"
-
-        thumb = self._create_thumbnail(img, thumb_size)
-        thumb_buffer = io.BytesIO()
-        thumb.save(thumb_buffer, format='WEBP', quality=thumb_quality, method=4)
         thumb_key = f"generated/thumbnails/{orientation}/{filename}_thumb.webp"
 
-        main_uploaded = False
-        thumb_uploaded = False
-        max_retries = 3
+        # Encode main and thumbnail in parallel threads
+        def encode_main():
+            buf = io.BytesIO()
+            img.save(buf, format='WEBP', quality=quality, method=2)
+            buf.seek(0)
+            return buf
 
+        def encode_thumb():
+            thumb = self._create_thumbnail(img, thumb_size)
+            buf = io.BytesIO()
+            thumb.save(buf, format='WEBP', quality=thumb_quality, method=2)
+            buf.seek(0)
+            return buf
+
+        with ThreadPoolExecutor(max_workers=2) as enc_executor:
+            main_future = enc_executor.submit(encode_main)
+            thumb_future = enc_executor.submit(encode_thumb)
+            main_buffer = main_future.result()
+            thumb_buffer = thumb_future.result()
+
+        # Upload both files in parallel
+        def upload_main():
+            s3.upload_fileobj(
+                main_buffer, bucket, main_key,
+                ExtraArgs={'ContentType': 'image/webp'}
+            )
+
+        def upload_thumb():
+            s3.upload_fileobj(
+                thumb_buffer, bucket, thumb_key,
+                ExtraArgs={'ContentType': 'image/webp'}
+            )
+
+        max_retries = 3
         for attempt in range(max_retries):
             try:
-                if not main_uploaded:
-                    main_buffer.seek(0)
-                    s3.upload_fileobj(
-                        main_buffer, bucket, main_key,
-                        ExtraArgs={'ContentType': 'image/webp'}
-                    )
-                    main_uploaded = True
-
-                if not thumb_uploaded:
-                    thumb_buffer.seek(0)
-                    s3.upload_fileobj(
-                        thumb_buffer, bucket, thumb_key,
-                        ExtraArgs={'ContentType': 'image/webp'}
-                    )
-                    thumb_uploaded = True
+                with ThreadPoolExecutor(max_workers=2) as upload_executor:
+                    main_upload_future = upload_executor.submit(upload_main)
+                    thumb_upload_future = upload_executor.submit(upload_thumb)
+                    main_upload_future.result()
+                    thumb_upload_future.result()
 
                 main_url = f"{public_url.rstrip('/')}/{main_key}"
                 thumb_url = f"{public_url.rstrip('/')}/{thumb_key}"
@@ -118,6 +137,8 @@ class SaveWebPToS3:
 
             except Exception as e:
                 if attempt < max_retries - 1:
+                    main_buffer.seek(0)
+                    thumb_buffer.seek(0)
                     continue
 
                 PromptServer.instance.send_sync("s3-upload-failed", {
@@ -134,7 +155,7 @@ class SaveWebPToS3:
         else:
             new_h = size
             new_w = int(w * size / h)
-        return img.resize((new_w, new_h), Image.LANCZOS)
+        return img.resize((new_w, new_h), Image.BILINEAR)
 
     def _get_orientation(self, w, h):
         if w > h:
@@ -149,5 +170,5 @@ class SaveWebPToS3:
 
 
 NODE_CLASS_MAPPINGS = {"SaveWebPToS3": SaveWebPToS3}
-NODE_DISPLAY_NAME_MAPPINGS = {"SaveWebPToS3": "Save WebP to S3 (Fantasio)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"SaveWebPToS3": "Save WebP to S3"}
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
