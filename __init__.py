@@ -100,7 +100,7 @@ class SaveWebPToS3:
         # Encode main and thumbnail in parallel threads
         def encode_main():
             buf = io.BytesIO()
-            img.save(buf, format='WEBP', quality=quality, method=2)
+            img.save(buf, format='WEBP', quality=quality, method=4)
             buf.seek(0)
             return buf
 
