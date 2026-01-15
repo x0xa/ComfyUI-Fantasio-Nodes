@@ -104,7 +104,7 @@ class SaveWebPToS3:
                 main_url = f"{public_url.rstrip('/')}/{main_key}"
                 thumb_url = f"{public_url.rstrip('/')}/{thumb_key}"
 
-                PromptServer.instance.send_sync("s3_image_uploaded", {
+                PromptServer.instance.send_sync("s3-image-uploaded", {
                     "url": main_url,
                     "thumb_url": thumb_url,
                     "path": main_key,
@@ -120,7 +120,7 @@ class SaveWebPToS3:
                 if attempt < max_retries - 1:
                     continue
 
-                PromptServer.instance.send_sync("s3_upload_failed", {
+                PromptServer.instance.send_sync("s3-upload-failed", {
                     "error": str(e),
                     "index": idx,
                 }, sid)
