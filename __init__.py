@@ -2,6 +2,8 @@ import io
 import uuid
 import boto3
 import numpy as np
+import torch
+import torch.nn.functional as F
 from PIL import Image
 from botocore.config import Config
 from concurrent.futures import ThreadPoolExecutor
@@ -70,13 +72,30 @@ class SaveWebPToS3:
     def _process_single_image(self, s3, image_tensor, idx, quality, thumb_quality, thumb_size, bucket, public_url, client_id):
         sid = client_id if client_id else None
 
-        img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
-        img = Image.fromarray(img_np)
-
+        h, w = image_tensor.shape[:2]
         filename = str(uuid.uuid4())
-        orientation = self._get_orientation(img.width, img.height)
+        orientation = self._get_orientation(w, h)
         main_key = f"generated/originals/{orientation}/{filename}.webp"
         thumb_key = f"generated/thumbnails/{orientation}/{filename}_thumb.webp"
+
+        # Calculate thumbnail dimensions
+        if w > h:
+            thumb_w, thumb_h = thumb_size, int(h * thumb_size / w)
+        else:
+            thumb_h, thumb_w = thumb_size, int(w * thumb_size / h)
+
+        # Resize thumbnail on GPU (much faster than CPU)
+        # tensor shape: (H, W, C) -> (1, C, H, W) for F.interpolate
+        tensor_for_resize = image_tensor.permute(2, 0, 1).unsqueeze(0)
+        thumb_tensor = F.interpolate(tensor_for_resize, size=(thumb_h, thumb_w), mode='bilinear', align_corners=False)
+        thumb_tensor = thumb_tensor.squeeze(0).permute(1, 2, 0)
+
+        # Convert both to numpy/PIL (move to CPU here)
+        img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
+        thumb_np = (thumb_tensor.cpu().numpy() * 255).astype(np.uint8)
+
+        img = Image.fromarray(img_np)
+        thumb = Image.fromarray(thumb_np)
 
         # Encode main and thumbnail in parallel threads
         def encode_main():
@@ -86,7 +105,6 @@ class SaveWebPToS3:
             return buf
 
         def encode_thumb():
-            thumb = self._create_thumbnail(img, thumb_size)
             buf = io.BytesIO()
             thumb.save(buf, format='WEBP', quality=thumb_quality, method=2)
             buf.seek(0)
@@ -129,8 +147,8 @@ class SaveWebPToS3:
                     "path": main_key,
                     "thumb_path": thumb_key,
                     "orientation": orientation,
-                    "width": img.width,
-                    "height": img.height,
+                    "width": w,
+                    "height": h,
                 }, sid)
 
                 return
@@ -146,16 +164,6 @@ class SaveWebPToS3:
                     "index": idx,
                 }, sid)
                 raise e
-
-    def _create_thumbnail(self, img, size):
-        w, h = img.size
-        if w > h:
-            new_w = size
-            new_h = int(h * size / w)
-        else:
-            new_h = size
-            new_w = int(w * size / h)
-        return img.resize((new_w, new_h), Image.BILINEAR)
 
     def _get_orientation(self, w, h):
         if w > h:
