@@ -128,11 +128,13 @@ class SaveWebPToS3:
 
     def _create_thumbnail(self, img, size):
         w, h = img.size
-        min_dim = min(w, h)
-        left = (w - min_dim) // 2
-        top = (h - min_dim) // 2
-        cropped = img.crop((left, top, left + min_dim, top + min_dim))
-        return cropped.resize((size, size), Image.LANCZOS)
+        if w > h:
+            new_w = size
+            new_h = int(h * size / w)
+        else:
+            new_h = size
+            new_w = int(w * size / h)
+        return img.resize((new_w, new_h), Image.LANCZOS)
 
     def _get_orientation(self, w, h):
         if w > h:
