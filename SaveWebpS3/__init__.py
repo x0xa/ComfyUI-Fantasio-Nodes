@@ -26,6 +26,7 @@ class SaveWebPToS3:
                 "s3_secret_key": ("STRING",),
                 "s3_bucket": ("STRING",),
                 "s3_public_url": ("STRING",),
+                "client_id": ("STRING",),
             }
         }
 
@@ -36,7 +37,7 @@ class SaveWebPToS3:
 
     def process(self, images, quality=85, thumb_quality=75, thumb_size=600,
                 s3_endpoint="", s3_access_key="", s3_secret_key="",
-                s3_bucket="", s3_public_url=""):
+                s3_bucket="", s3_public_url="", client_id=""):
 
         if not all([s3_endpoint, s3_access_key, s3_secret_key, s3_bucket, s3_public_url]):
             raise ValueError("S3 credentials missing")
@@ -54,43 +55,51 @@ class SaveWebPToS3:
             self._process_single_image(
                 s3, image_tensor, idx,
                 quality, thumb_quality, thumb_size,
-                s3_bucket, s3_public_url
+                s3_bucket, s3_public_url, client_id
             )
 
         return {"ui": {"images": []}}
 
     def _process_single_image(self, s3, image_tensor, idx, quality, thumb_quality,
-                               thumb_size, bucket, public_url):
+                               thumb_size, bucket, public_url, client_id):
+        sid = client_id if client_id else None
+
+        img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
+        img = Image.fromarray(img_np)
+
+        filename = str(uuid.uuid4())
+        orientation = self._get_orientation(img.width, img.height)
+
+        main_buffer = io.BytesIO()
+        img.save(main_buffer, format='WEBP', quality=quality, method=4)
+        main_key = f"generated/originals/{orientation}/{filename}.webp"
+
+        thumb = self._create_thumbnail(img, thumb_size)
+        thumb_buffer = io.BytesIO()
+        thumb.save(thumb_buffer, format='WEBP', quality=thumb_quality, method=4)
+        thumb_key = f"generated/thumbnails/{orientation}/{filename}_thumb.webp"
+
+        main_uploaded = False
+        thumb_uploaded = False
         max_retries = 3
-        last_error = None
 
         for attempt in range(max_retries):
             try:
-                img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
-                img = Image.fromarray(img_np)
+                if not main_uploaded:
+                    main_buffer.seek(0)
+                    s3.upload_fileobj(
+                        main_buffer, bucket, main_key,
+                        ExtraArgs={'ContentType': 'image/webp'}
+                    )
+                    main_uploaded = True
 
-                filename = str(uuid.uuid4())
-                orientation = self._get_orientation(img.width, img.height)
-
-                main_buffer = io.BytesIO()
-                img.save(main_buffer, format='WEBP', quality=quality, method=4)
-                main_buffer.seek(0)
-                main_key = f"generated/originals/{orientation}/{filename}.webp"
-
-                thumb = self._create_thumbnail(img, thumb_size)
-                thumb_buffer = io.BytesIO()
-                thumb.save(thumb_buffer, format='WEBP', quality=thumb_quality, method=4)
-                thumb_buffer.seek(0)
-                thumb_key = f"generated/thumbnails/{orientation}/{filename}_thumb.webp"
-
-                s3.upload_fileobj(
-                    main_buffer, bucket, main_key,
-                    ExtraArgs={'ContentType': 'image/webp'}
-                )
-                s3.upload_fileobj(
-                    thumb_buffer, bucket, thumb_key,
-                    ExtraArgs={'ContentType': 'image/webp'}
-                )
+                if not thumb_uploaded:
+                    thumb_buffer.seek(0)
+                    s3.upload_fileobj(
+                        thumb_buffer, bucket, thumb_key,
+                        ExtraArgs={'ContentType': 'image/webp'}
+                    )
+                    thumb_uploaded = True
 
                 main_url = f"{public_url.rstrip('/')}/{main_key}"
                 thumb_url = f"{public_url.rstrip('/')}/{thumb_key}"
@@ -103,20 +112,19 @@ class SaveWebPToS3:
                     "orientation": orientation,
                     "width": img.width,
                     "height": img.height,
-                })
+                }, sid)
 
                 return
 
             except Exception as e:
-                last_error = e
                 if attempt < max_retries - 1:
                     continue
 
-        PromptServer.instance.send_sync("s3_upload_failed", {
-            "error": str(last_error),
-            "index": idx,
-        })
-        raise last_error
+                PromptServer.instance.send_sync("s3_upload_failed", {
+                    "error": str(e),
+                    "index": idx,
+                }, sid)
+                raise e
 
     def _create_thumbnail(self, img, size):
         w, h = img.size
