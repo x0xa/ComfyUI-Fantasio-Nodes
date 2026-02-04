@@ -17,8 +17,20 @@ from botocore.config import Config
 from concurrent.futures import ThreadPoolExecutor
 from server import PromptServer
 
+_GPU_ACTIVITY_LAST_SENT_AT = {}
+_GPU_ACTIVITY_INTERVAL_SECONDS = max(0.5, float(os.environ.get("FANTASIO_GPU_ACTIVITY_INTERVAL_SECONDS", "5.0")))
+
 
 def _send_gpu_activity(message, sid=None, value=None, max_value=None, node=None):
+    if sid is not None and value is not None and max_value is not None:
+        is_terminal_progress = float(value) >= float(max_value)
+        if not is_terminal_progress:
+            now = time.monotonic()
+            last_sent_at = _GPU_ACTIVITY_LAST_SENT_AT.get(sid, 0.0)
+            if now - last_sent_at < _GPU_ACTIVITY_INTERVAL_SECONDS:
+                return
+            _GPU_ACTIVITY_LAST_SENT_AT[sid] = now
+
     payload = {"message": message}
 
     if value is not None:
@@ -864,6 +876,7 @@ class FantasioEmitTrainingEpochUploaded:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "network_trainer": ("NETWORKTRAINER",),
                 "task_id": ("INT", {"default": 0, "min": 0}),
                 "user_id": ("INT", {"default": 0, "min": 0}),
                 "total_epochs": ("INT", {"default": 0, "min": 0}),
@@ -878,12 +891,12 @@ class FantasioEmitTrainingEpochUploaded:
             }
         }
 
-    RETURN_TYPES = ()
-    OUTPUT_NODE = True
+    RETURN_TYPES = ("NETWORKTRAINER",)
+    RETURN_NAMES = ("network_trainer",)
     FUNCTION = "run"
     CATEGORY = "fantasio/training"
 
-    def run(self, task_id, user_id, total_epochs, epoch, avg_loss, step, lora_url, sample_urls, client_id=""):
+    def run(self, network_trainer, task_id, user_id, total_epochs, epoch, avg_loss, step, lora_url, sample_urls, client_id=""):
         sid = client_id if client_id else None
 
         try:
@@ -912,7 +925,7 @@ class FantasioEmitTrainingEpochUploaded:
 
             _send_gpu_activity(f"Epoch {epoch} artifacts uploaded", sid=sid)
 
-            return {"ui": {"epoch": epoch}}
+            return (network_trainer,)
         except Exception as e:
             _send_error(str(e), "FantasioEmitTrainingEpochUploaded", task_id=task_id, sid=sid)
             raise
