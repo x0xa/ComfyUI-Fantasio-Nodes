@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import time
 import uuid
 import tarfile
 import zipfile
@@ -59,7 +60,9 @@ def _download_to_file(url, output_path, timeout_seconds=60, chunk_size=1024 * 51
             total_bytes = int(total) if total else None
 
             downloaded = 0
-            last_reported = 0
+            progress_interval_seconds = max(0.5, float(os.environ.get("FANTASIO_DOWNLOAD_PROGRESS_INTERVAL_SECONDS", "5.0")))
+            last_reported_percent = 0
+            last_reported_at = 0.0
 
             with open(output_path, "wb") as output_file:
                 while True:
@@ -71,13 +74,18 @@ def _download_to_file(url, output_path, timeout_seconds=60, chunk_size=1024 * 51
                     output_file.write(chunk)
                     downloaded += len(chunk)
 
-                    if total_bytes and downloaded - last_reported >= max(total_bytes // 20, chunk_size):
+                    if total_bytes:
                         percent = int((downloaded / total_bytes) * 100)
-                        _send_gpu_activity(f"Downloading: {percent}%", sid=sid, value=percent, max_value=100)
-                        last_reported = downloaded
+                        if percent >= 100:
+                            continue
 
-            if total_bytes:
-                _send_gpu_activity("Downloading: 100%", sid=sid, value=100, max_value=100)
+                        now = time.monotonic()
+                        if percent > last_reported_percent and now - last_reported_at >= progress_interval_seconds:
+                            _send_gpu_activity(f"Downloading: {percent}%", sid=sid, value=percent, max_value=100)
+                            last_reported_percent = percent
+                            last_reported_at = now
+
+            _send_gpu_activity("Downloading: 100%", sid=sid, value=100, max_value=100)
 
     except HTTPError as e:
         if os.path.exists(output_path):
@@ -161,7 +169,7 @@ class SaveWebPToS3:
                     self._process_single_image,
                     s3, image_tensor, idx,
                     quality, thumb_quality, thumb_size,
-                    s3_bucket, s3_public_url, client_id
+                    s3_bucket, s3_public_url, sid
                 )
                 for idx, image_tensor in enumerate(images)
             ]
@@ -170,8 +178,7 @@ class SaveWebPToS3:
 
         return {"ui": {"images": []}}
 
-    def _process_single_image(self, s3, image_tensor, idx, quality, thumb_quality, thumb_size, bucket, public_url, client_id):
-        sid = client_id if client_id else None
+    def _process_single_image(self, s3, image_tensor, idx, quality, thumb_quality, thumb_size, bucket, public_url, sid):
         main_buffer = None
         thumb_buffer = None
 
