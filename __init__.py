@@ -289,6 +289,8 @@ class FantasioDownloadFile:
                 "output_path": ("STRING", {"multiline": False}),
             },
             "optional": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
                 "timeout_seconds": ("INT", {"default": 60, "min": 5, "max": 3600}),
                 "overwrite": ("BOOLEAN", {"default": False}),
                 "return_basename": ("BOOLEAN", {"default": False}),
@@ -299,24 +301,24 @@ class FantasioDownloadFile:
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("output_path",)
+    RETURN_TYPES = ("STRING", "MODEL", "CLIP")
+    RETURN_NAMES = ("output_path", "model", "clip")
     FUNCTION = "run"
     CATEGORY = "fantasio/io"
 
-    def run(self, url, output_path, timeout_seconds=60, overwrite=False, return_basename=False, client_id="", task_id=0):
+    def run(self, url, output_path, model=None, clip=None, timeout_seconds=60, overwrite=False, return_basename=False, client_id="", task_id=0):
         sid = client_id if client_id else None
 
         try:
             if not overwrite and os.path.isfile(output_path):
                 _send_gpu_activity(f"File already exists: {output_path}", sid=sid)
-                return ((os.path.basename(output_path) if return_basename else output_path),)
+                return ((os.path.basename(output_path) if return_basename else output_path), model, clip)
 
             _send_gpu_activity(f"Downloading file to {output_path}", sid=sid)
             _download_to_file(url, output_path, timeout_seconds=timeout_seconds, sid=sid)
             _send_gpu_activity(f"Downloaded file to {output_path}", sid=sid)
 
-            return ((os.path.basename(output_path) if return_basename else output_path),)
+            return ((os.path.basename(output_path) if return_basename else output_path), model, clip)
         except Exception as e:
             _send_error(str(e), "FantasioDownloadFile", task_id=task_id, sid=sid)
             raise
