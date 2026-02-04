@@ -324,6 +324,75 @@ class FantasioDownloadFile:
             raise
 
 
+class FantasioLoraLoader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "lora_name": ("STRING", {"multiline": False}),
+                "strength_model": ("FLOAT", {"default": 1.0, "min": -20.0, "max": 20.0, "step": 0.01}),
+                "strength_clip": ("FLOAT", {"default": 1.0, "min": -20.0, "max": 20.0, "step": 0.01}),
+            },
+            "hidden": {
+                "client_id": ("STRING",),
+                "task_id": ("INT",),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "CLIP")
+    FUNCTION = "run"
+    CATEGORY = "loaders"
+
+    def run(self, model, clip, lora_name, strength_model, strength_clip, client_id="", task_id=0):
+        sid = client_id if client_id else None
+
+        try:
+            if strength_model == 0 and strength_clip == 0:
+                return (model, clip)
+
+            import folder_paths
+            import comfy.sd
+            import comfy.utils
+
+            lora_path = None
+
+            if os.path.isabs(lora_name):
+                lora_path = lora_name
+            else:
+                env_lora_dir = os.environ.get("COMFY_LORAS_DIR", "").strip()
+                if env_lora_dir:
+                    candidate = os.path.join(env_lora_dir, lora_name)
+                    if os.path.isfile(candidate):
+                        lora_path = candidate
+
+                if lora_path is None:
+                    full_path = folder_paths.get_full_path("loras", lora_name)
+                    if full_path and os.path.isfile(full_path):
+                        lora_path = full_path
+
+                if lora_path is None:
+                    lora_folders = folder_paths.get_folder_paths("loras")
+                    for folder in lora_folders:
+                        candidate = os.path.join(folder, lora_name)
+                        if os.path.isfile(candidate):
+                            lora_path = candidate
+                            break
+
+            if lora_path is None or not os.path.isfile(lora_path):
+                raise RuntimeError(f"LoRA file not found: {lora_name}")
+
+            _send_gpu_activity(f"Loading LoRA {os.path.basename(lora_path)}", sid=sid)
+            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+            model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora, strength_model, strength_clip)
+
+            return (model_lora, clip_lora)
+        except Exception as e:
+            _send_error(str(e), "FantasioLoraLoader", task_id=task_id, sid=sid)
+            raise
+
+
 def _validate_archive_member(member_name, output_dir):
     if os.path.isabs(member_name):
         raise ValueError(f"Path traversal detected: absolute path '{member_name}'")
@@ -844,6 +913,7 @@ class FantasioEmitTrainingEpochUploaded:
 NODE_CLASS_MAPPINGS = {
     "SaveWebPToS3": SaveWebPToS3,
     "FantasioDownloadFile": FantasioDownloadFile,
+    "FantasioLoraLoader": FantasioLoraLoader,
     "FantasioDownloadAndExtractArchive": FantasioDownloadAndExtractArchive,
     "FantasioLoadImageFromUrl": FantasioLoadImageFromUrl,
     "FantasioConvertImagesToWebP": FantasioConvertImagesToWebP,
@@ -855,6 +925,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveWebPToS3": "Save WebP to S3",
     "FantasioDownloadFile": "Fantasio Download File",
+    "FantasioLoraLoader": "Fantasio LoRA Loader",
     "FantasioDownloadAndExtractArchive": "Fantasio Download And Extract Archive",
     "FantasioLoadImageFromUrl": "Fantasio Load Image From URL",
     "FantasioConvertImagesToWebP": "Fantasio Convert Images To WebP",
