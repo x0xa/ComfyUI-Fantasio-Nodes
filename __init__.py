@@ -612,19 +612,9 @@ class FantasioConvertImagesToWebP:
             temp_paths = []
             final_paths = []
 
-            print(f"[FantasioConvertImagesToWebP] images type: {type(images)}, len: {len(images) if hasattr(images, '__len__') else 'N/A'}")
-            if hasattr(images, 'shape'):
-                print(f"[FantasioConvertImagesToWebP] images shape: {images.shape}")
-            if isinstance(images, (list, tuple)) and len(images) > 0:
-                print(f"[FantasioConvertImagesToWebP] first element type: {type(images[0])}")
-                if hasattr(images[0], 'shape'):
-                    print(f"[FantasioConvertImagesToWebP] first element shape: {images[0].shape}")
-
             total = len(images)
-            print(f"[FantasioConvertImagesToWebP] total images to convert: {total}")
 
             for index, image_tensor in enumerate(images):
-                print(f"[FantasioConvertImagesToWebP] processing image {index}, tensor shape: {image_tensor.shape if hasattr(image_tensor, 'shape') else 'N/A'}")
                 filename = f"{prefix}_{index}_{uuid.uuid4().hex}.webp"
                 temp_path = os.path.join(temp_dir, filename)
                 final_path = os.path.join(output_dir, filename)
@@ -701,8 +691,6 @@ class FantasioUploadLocalFileToS3:
         sid = client_id if client_id else None
         max_retries = 3
         retry_delay = 3
-
-        print(f"[FantasioUploadLocalFileToS3] file_path={file_path}, s3_endpoint={s3_endpoint[:30] if s3_endpoint else 'EMPTY'}, s3_bucket={s3_bucket}")
 
         try:
             if not os.path.isfile(file_path):
@@ -788,15 +776,12 @@ class FantasioUploadLocalFilesToS3:
 
         sid = client_id if client_id else None
 
-        print(f"[FantasioUploadLocalFilesToS3] file_paths={file_paths[:200] if file_paths else 'EMPTY'}, s3_endpoint={s3_endpoint[:30] if s3_endpoint else 'EMPTY'}")
-
         try:
             if not all([s3_endpoint, s3_access_key, s3_secret_key, s3_bucket, s3_public_url]):
                 raise ValueError("S3 credentials missing")
 
             paths = [line.strip() for line in file_paths.splitlines() if line.strip()]
             if not paths:
-                print(f"[FantasioUploadLocalFilesToS3] No paths to upload, returning empty")
                 return ("",)
 
             for path in paths:
@@ -916,8 +901,6 @@ class FantasioEmitTrainingEpochUploaded:
         sid = client_id if client_id else None
 
         try:
-            print(f"[FantasioEmitTrainingEpochUploaded] epoch={epoch}, lora_url={lora_url}, sample_urls={sample_urls[:200] if sample_urls else 'empty'}")
-
             urls = [line.strip() for line in sample_urls.splitlines() if line.strip()]
             payload = {
                 "task_id": int(task_id),
