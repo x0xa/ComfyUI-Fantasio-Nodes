@@ -125,95 +125,77 @@ class SaveWebPToS3:
         return {"ui": {"images": []}}
 
     def _process_single_image(self, s3, image_tensor, idx, quality, thumb_quality, thumb_size, bucket, public_url, sid):
-        main_buffer = None
-        thumb_buffer = None
+        h, w = image_tensor.shape[:2]
+        filename = str(uuid.uuid4())
+        orientation = self._get_orientation(w, h)
+        main_key = f"generated/originals/{orientation}/{filename}.webp"
+        thumb_key = f"generated/thumbnails/{orientation}/{filename}_thumb.webp"
 
-        try:
-            h, w = image_tensor.shape[:2]
-            filename = str(uuid.uuid4())
-            orientation = self._get_orientation(w, h)
-            main_key = f"generated/originals/{orientation}/{filename}.webp"
-            thumb_key = f"generated/thumbnails/{orientation}/{filename}_thumb.webp"
+        if w > h:
+            thumb_w, thumb_h = thumb_size, int(h * thumb_size / w)
+        else:
+            thumb_h, thumb_w = thumb_size, int(w * thumb_size / h)
 
-            if w > h:
-                thumb_w, thumb_h = thumb_size, int(h * thumb_size / w)
-            else:
-                thumb_h, thumb_w = thumb_size, int(w * thumb_size / h)
+        tensor_for_resize = image_tensor.permute(2, 0, 1).unsqueeze(0)
+        thumb_tensor = F.interpolate(tensor_for_resize, size=(thumb_h, thumb_w), mode='bilinear', align_corners=False)
+        thumb_tensor = thumb_tensor.squeeze(0).permute(1, 2, 0)
 
-            tensor_for_resize = image_tensor.permute(2, 0, 1).unsqueeze(0)
-            thumb_tensor = F.interpolate(tensor_for_resize, size=(thumb_h, thumb_w), mode='bilinear', align_corners=False)
-            thumb_tensor = thumb_tensor.squeeze(0).permute(1, 2, 0)
+        img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
+        thumb_np = (thumb_tensor.cpu().numpy() * 255).astype(np.uint8)
 
-            img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
-            thumb_np = (thumb_tensor.cpu().numpy() * 255).astype(np.uint8)
+        img = Image.fromarray(img_np)
+        thumb = Image.fromarray(thumb_np)
 
-            img = Image.fromarray(img_np)
-            thumb = Image.fromarray(thumb_np)
+        def encode(image, encode_quality, method):
+            buf = io.BytesIO()
+            try:
+                image.save(buf, format='WEBP', quality=encode_quality, method=method)
+                return buf.getvalue()
+            finally:
+                buf.close()
 
-            def encode_main():
-                buf = io.BytesIO()
-                img.save(buf, format='WEBP', quality=quality, method=4)
-                buf.seek(0)
-                return buf
+        with ThreadPoolExecutor(max_workers=2) as enc_executor:
+            main_future = enc_executor.submit(encode, img, quality, 4)
+            thumb_future = enc_executor.submit(encode, thumb, thumb_quality, 2)
+            main_bytes = main_future.result()
+            thumb_bytes = thumb_future.result()
 
-            def encode_thumb():
-                buf = io.BytesIO()
-                thumb.save(buf, format='WEBP', quality=thumb_quality, method=2)
-                buf.seek(0)
-                return buf
+        def upload(key, body):
+            s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType='image/webp')
 
-            with ThreadPoolExecutor(max_workers=2) as enc_executor:
-                main_future = enc_executor.submit(encode_main)
-                thumb_future = enc_executor.submit(encode_thumb)
-                main_buffer = main_future.result()
-                thumb_buffer = thumb_future.result()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with ThreadPoolExecutor(max_workers=2) as upload_executor:
+                    main_upload_future = upload_executor.submit(upload, main_key, main_bytes)
+                    thumb_upload_future = upload_executor.submit(upload, thumb_key, thumb_bytes)
+                    main_upload_future.result()
+                    thumb_upload_future.result()
 
-            def upload_main():
-                s3.upload_fileobj(main_buffer, bucket, main_key, ExtraArgs={'ContentType': 'image/webp'})
+                main_url = normalize_s3_public_url(public_url, main_key)
+                thumb_url = normalize_s3_public_url(public_url, thumb_key)
 
-            def upload_thumb():
-                s3.upload_fileobj(thumb_buffer, bucket, thumb_key, ExtraArgs={'ContentType': 'image/webp'})
+                PromptServer.instance.send_sync("s3-image-uploaded", {
+                    "url": main_url,
+                    "thumb_url": thumb_url,
+                    "path": main_key,
+                    "thumb_path": thumb_key,
+                    "orientation": orientation,
+                    "width": w,
+                    "height": h,
+                }, sid)
 
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    with ThreadPoolExecutor(max_workers=2) as upload_executor:
-                        main_upload_future = upload_executor.submit(upload_main)
-                        thumb_upload_future = upload_executor.submit(upload_thumb)
-                        main_upload_future.result()
-                        thumb_upload_future.result()
+                return
 
-                    main_url = normalize_s3_public_url(public_url, main_key)
-                    thumb_url = normalize_s3_public_url(public_url, thumb_key)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    continue
 
-                    PromptServer.instance.send_sync("s3-image-uploaded", {
-                        "url": main_url,
-                        "thumb_url": thumb_url,
-                        "path": main_key,
-                        "thumb_path": thumb_key,
-                        "orientation": orientation,
-                        "width": w,
-                        "height": h,
-                    }, sid)
-
-                    return
-
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        main_buffer.seek(0)
-                        thumb_buffer.seek(0)
-                        continue
-
-                    PromptServer.instance.send_sync("s3-upload-failed", {
-                        "error": str(e),
-                        "index": idx,
-                    }, sid)
-                    raise e
-        finally:
-            if main_buffer:
-                main_buffer.close()
-            if thumb_buffer:
-                thumb_buffer.close()
+                PromptServer.instance.send_sync("s3-upload-failed", {
+                    "error": str(e),
+                    "index": idx,
+                }, sid)
+                raise e
 
     def _get_orientation(self, w, h):
         if w > h:

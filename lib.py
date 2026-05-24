@@ -1,11 +1,3 @@
-"""Shared primitives for Fantasio nodes and the AI Toolkit training integration.
-
-S3 access, WebP encoding and archive download/extraction live here so both the
-inference nodes in this package and the training integration in comfyui-ai-toolkit
-use one implementation. Progress reporting is delegated through optional callbacks
-so this module stays free of any ComfyUI/PromptServer coupling.
-"""
-
 import io
 import os
 import time
