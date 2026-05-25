@@ -11,7 +11,7 @@ from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 from server import PromptServer
 
-from .lib import create_s3_client, normalize_s3_public_url, download_to_file
+from .lib import create_s3_client, normalize_s3_public_url, download_to_file, download_and_extract_archive
 
 _GPU_ACTIVITY_LAST_SENT_AT = {}
 _GPU_ACTIVITY_INTERVAL_SECONDS = max(0.5, float(os.environ.get("FANTASIO_GPU_ACTIVITY_INTERVAL_SECONDS", "5.0")))
@@ -366,16 +366,92 @@ class FantasioLoadImageFromUrl:
             raise
 
 
+class FantasioDownloadAndExtractArchive:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "url": ("STRING", {"multiline": False}),
+                "output_dir": ("STRING", {"multiline": False}),
+            },
+            "optional": {
+                "archive_name": ("STRING", {"default": ""}),
+                "timeout_seconds": ("INT", {"default": 300, "min": 5, "max": 3600}),
+                "clean_archive": ("BOOLEAN", {"default": True}),
+            },
+            "hidden": {
+                "client_id": ("STRING",),
+                "task_id": ("INT",),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("folder_path",)
+    FUNCTION = "run"
+    CATEGORY = "fantasio/io"
+
+    def run(self, url, output_dir, archive_name="", timeout_seconds=300, clean_archive=True, client_id="", task_id=0):
+        sid = client_id if client_id else None
+
+        try:
+            _send_gpu_activity("Downloading dataset archive", sid=sid)
+            download_and_extract_archive(
+                url,
+                output_dir,
+                archive_name=archive_name,
+                timeout_seconds=timeout_seconds,
+                progress_cb=_download_progress_cb(sid),
+            )
+            _send_gpu_activity(f"Dataset extracted to {output_dir}", sid=sid)
+
+            return (output_dir,)
+        except Exception as e:
+            _send_error(str(e), "FantasioDownloadAndExtractArchive", task_id=task_id, sid=sid)
+            raise
+
+
+class FantasioApplyTriggerWord:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "caption": ("STRING", {"forceInput": True}),
+                "trigger_word": ("STRING", {"default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("caption",)
+    FUNCTION = "run"
+    CATEGORY = "fantasio"
+
+    def run(self, caption, trigger_word=""):
+        text = caption.strip() if isinstance(caption, str) else ""
+        word = trigger_word.strip() if isinstance(trigger_word, str) else ""
+
+        if not word:
+            return (text,)
+
+        if not text:
+            return (word,)
+
+        return (f"{word}, {text}",)
+
+
 NODE_CLASS_MAPPINGS = {
     "SaveWebPToS3": SaveWebPToS3,
     "FantasioDownloadFile": FantasioDownloadFile,
     "FantasioLoraLoader": FantasioLoraLoader,
     "FantasioLoadImageFromUrl": FantasioLoadImageFromUrl,
+    "FantasioDownloadAndExtractArchive": FantasioDownloadAndExtractArchive,
+    "FantasioApplyTriggerWord": FantasioApplyTriggerWord,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveWebPToS3": "Save WebP to S3",
     "FantasioDownloadFile": "Fantasio Download File",
     "FantasioLoraLoader": "Fantasio LoRA Loader",
     "FantasioLoadImageFromUrl": "Fantasio Load Image From URL",
+    "FantasioDownloadAndExtractArchive": "Fantasio Download And Extract Archive",
+    "FantasioApplyTriggerWord": "Fantasio Apply Trigger Word",
 }
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
