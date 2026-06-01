@@ -15,10 +15,29 @@ import boto3
 import numpy as np
 from PIL import Image
 from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 
 DOWNLOAD_CHUNK_SIZE = 1024 * 512
 UPLOAD_MAX_RETRIES = 3
 UPLOAD_RETRY_DELAY_SECONDS = 3
+
+
+def describe_exception(error):
+    text = str(error).strip()
+    name = type(error).__name__
+    lowered = text.lower()
+
+    if name == "OutOfMemoryError" or "out of memory" in lowered or "cuda error" in lowered:
+        return f"CUDA out of memory / GPU error: {text}"
+
+    if isinstance(error, ClientError):
+        code = error.response.get("Error", {}).get("Code")
+        return f"S3 client error ({code}): {text}" if code else f"S3 client error: {text}"
+
+    if isinstance(error, BotoCoreError):
+        return f"S3 connection error ({name}): {text}"
+
+    return f"{name}: {text}"
 
 
 def create_s3_client(s3_endpoint, s3_access_key, s3_secret_key):

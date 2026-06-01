@@ -11,7 +11,7 @@ from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 from server import PromptServer
 
-from .lib import create_s3_client, normalize_s3_public_url, download_to_file, download_and_extract_archive
+from .lib import create_s3_client, normalize_s3_public_url, download_to_file, download_and_extract_archive, describe_exception
 
 _GPU_ACTIVITY_LAST_SENT_AT = {}
 _GPU_ACTIVITY_INTERVAL_SECONDS = max(0.5, float(os.environ.get("FANTASIO_GPU_ACTIVITY_INTERVAL_SECONDS", "5.0")))
@@ -93,14 +93,21 @@ class SaveWebPToS3:
         sid = client_id if client_id else None
 
         try:
-            if not all([s3_endpoint, s3_access_key, s3_secret_key, s3_bucket, s3_public_url]):
-                raise ValueError("S3 credentials missing")
+            missing = [name for name, value in (
+                ("endpoint", s3_endpoint),
+                ("access_key", s3_access_key),
+                ("secret_key", s3_secret_key),
+                ("bucket", s3_bucket),
+                ("public_url", s3_public_url),
+            ) if not value]
+            if missing:
+                raise ValueError(f"S3 credentials missing: {', '.join(missing)}")
 
             return self._process_images(images, quality, thumb_quality, thumb_size,
                                         s3_endpoint, s3_access_key, s3_secret_key,
                                         s3_bucket, s3_public_url, sid, task_id)
         except Exception as e:
-            _send_error(str(e), "SaveWebPToS3", task_id=task_id, sid=sid)
+            _send_error(describe_exception(e), "SaveWebPToS3", task_id=task_id, sid=sid)
             raise
 
     def _process_images(self, images, quality, thumb_quality, thumb_size,
@@ -191,9 +198,19 @@ class SaveWebPToS3:
                 if attempt < max_retries - 1:
                     continue
 
+                size_bytes = len(main_bytes) + len(thumb_bytes)
+                detail = (
+                    f"S3 upload failed for {main_key} (+thumbnail) in bucket '{bucket}', "
+                    f"{size_bytes} bytes, after {max_retries} attempts: {describe_exception(e)}"
+                )
                 PromptServer.instance.send_sync("s3-upload-failed", {
-                    "error": str(e),
+                    "error": detail,
                     "index": idx,
+                    "bucket": bucket,
+                    "key": main_key,
+                    "thumb_key": thumb_key,
+                    "attempts": max_retries,
+                    "size_bytes": size_bytes,
                 }, sid)
                 raise e
 
@@ -286,13 +303,16 @@ class FantasioLoraLoader:
             import comfy.utils
 
             lora_path = None
+            searched_paths = []
 
             if os.path.isabs(lora_name):
                 lora_path = lora_name
+                searched_paths.append(lora_name)
             else:
                 env_lora_dir = os.environ.get("COMFY_LORAS_DIR", "").strip()
                 if env_lora_dir:
                     candidate = os.path.join(env_lora_dir, lora_name)
+                    searched_paths.append(candidate)
                     if os.path.isfile(candidate):
                         lora_path = candidate
 
@@ -305,20 +325,33 @@ class FantasioLoraLoader:
                     lora_folders = folder_paths.get_folder_paths("loras")
                     for folder in lora_folders:
                         candidate = os.path.join(folder, lora_name)
+                        searched_paths.append(candidate)
                         if os.path.isfile(candidate):
                             lora_path = candidate
                             break
 
             if lora_path is None or not os.path.isfile(lora_path):
-                raise RuntimeError(f"LoRA file not found: {lora_name}")
+                searched = ", ".join(searched_paths) if searched_paths else "no candidate paths"
+                raise RuntimeError(f"LoRA file not found: {lora_name} (searched: {searched})")
 
             _send_gpu_activity(f"Loading LoRA {os.path.basename(lora_path)}", sid=sid)
-            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
-            model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora, strength_model, strength_clip)
+
+            try:
+                lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+            except Exception as e:
+                raise RuntimeError(f"Failed to read LoRA file {lora_path}: {describe_exception(e)}") from e
+
+            try:
+                model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora, strength_model, strength_clip)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to apply LoRA {os.path.basename(lora_path)} "
+                    f"(strength_model={strength_model}, strength_clip={strength_clip}): {describe_exception(e)}"
+                ) from e
 
             return (model_lora, clip_lora)
         except Exception as e:
-            _send_error(str(e), "FantasioLoraLoader", task_id=task_id, sid=sid)
+            _send_error(describe_exception(e), "FantasioLoraLoader", task_id=task_id, sid=sid)
             raise
 
 
@@ -354,7 +387,14 @@ class FantasioLoadImageFromUrl:
             with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 data = response.read()
 
-            image = Image.open(io.BytesIO(data)).convert("RGB")
+            try:
+                image = Image.open(io.BytesIO(data)).convert("RGB")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Downloaded {len(data)} bytes from {url} but could not decode as an image "
+                    f"(content may be an error page or unsupported format): {describe_exception(e)}"
+                ) from e
+
             image_np = np.array(image).astype(np.float32) / 255.0
             image_tensor = torch.from_numpy(image_np)
 
@@ -362,7 +402,7 @@ class FantasioLoadImageFromUrl:
 
             return (image_tensor.unsqueeze(0),)
         except Exception as e:
-            _send_error(str(e), "FantasioLoadImageFromUrl", task_id=task_id, sid=sid)
+            _send_error(f"Failed to load image from {url}: {describe_exception(e)}", "FantasioLoadImageFromUrl", task_id=task_id, sid=sid)
             raise
 
 
