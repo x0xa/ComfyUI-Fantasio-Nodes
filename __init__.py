@@ -478,6 +478,147 @@ class FantasioApplyTriggerWord:
         return (f"{word}, {text}",)
 
 
+class FantasioUNETLoader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "unet_name": ("STRING", {"multiline": False}),
+            },
+            "optional": {
+                "weight_dtype": ("STRING", {"default": "default"}),
+            },
+            "hidden": {
+                "client_id": ("STRING",),
+                "task_id": ("INT",),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "run"
+    CATEGORY = "fantasio/loaders"
+
+    def run(self, unet_name, weight_dtype="default", client_id="", task_id=0):
+        sid = client_id if client_id else None
+
+        try:
+            import folder_paths
+            import comfy.sd
+
+            model_options = {}
+            if weight_dtype == "fp8_e4m3fn":
+                model_options["dtype"] = torch.float8_e4m3fn
+            elif weight_dtype == "fp8_e4m3fn_fast":
+                model_options["dtype"] = torch.float8_e4m3fn
+                model_options["fp8_optimizations"] = True
+            elif weight_dtype == "fp8_e5m2":
+                model_options["dtype"] = torch.float8_e5m2
+
+            unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
+            unet_basename = os.path.basename(unet_path)
+
+            _send_gpu_activity(f"Loading diffusion model {unet_basename}", sid=sid)
+            model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
+            _send_gpu_activity(f"Diffusion model {unet_basename} loaded", sid=sid)
+
+            return (model,)
+        except Exception as e:
+            _send_error(describe_exception(e), "FantasioUNETLoader", task_id=task_id, sid=sid)
+            raise
+
+
+class FantasioCLIPLoader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip_name": ("STRING", {"multiline": False}),
+                "type": ("STRING", {"default": "stable_diffusion"}),
+            },
+            "optional": {
+                "device": ("STRING", {"default": "default"}),
+            },
+            "hidden": {
+                "client_id": ("STRING",),
+                "task_id": ("INT",),
+            }
+        }
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "run"
+    CATEGORY = "fantasio/loaders"
+
+    def run(self, clip_name, type="stable_diffusion", device="default", client_id="", task_id=0):
+        sid = client_id if client_id else None
+
+        try:
+            import folder_paths
+            import comfy.sd
+
+            clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
+
+            model_options = {}
+            if device == "cpu":
+                model_options["load_device"] = model_options["offload_device"] = torch.device("cpu")
+
+            clip_path = folder_paths.get_full_path_or_raise("text_encoders", clip_name)
+            clip_basename = os.path.basename(clip_path)
+
+            _send_gpu_activity(f"Loading text encoder {clip_basename}", sid=sid)
+            clip = comfy.sd.load_clip(
+                ckpt_paths=[clip_path],
+                embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                clip_type=clip_type,
+                model_options=model_options,
+            )
+            _send_gpu_activity(f"Text encoder {clip_basename} loaded", sid=sid)
+
+            return (clip,)
+        except Exception as e:
+            _send_error(describe_exception(e), "FantasioCLIPLoader", task_id=task_id, sid=sid)
+            raise
+
+
+class FantasioVAELoader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "vae_name": ("STRING", {"multiline": False}),
+            },
+            "hidden": {
+                "client_id": ("STRING",),
+                "task_id": ("INT",),
+            }
+        }
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "run"
+    CATEGORY = "fantasio/loaders"
+
+    def run(self, vae_name, client_id="", task_id=0):
+        sid = client_id if client_id else None
+
+        try:
+            import folder_paths
+            import comfy.sd
+            import comfy.utils
+
+            vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
+            vae_basename = os.path.basename(vae_path)
+
+            _send_gpu_activity(f"Loading VAE {vae_basename}", sid=sid)
+            sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
+            vae = comfy.sd.VAE(sd=sd, metadata=metadata)
+            vae.throw_exception_if_invalid()
+            _send_gpu_activity(f"VAE {vae_basename} loaded", sid=sid)
+
+            return (vae,)
+        except Exception as e:
+            _send_error(describe_exception(e), "FantasioVAELoader", task_id=task_id, sid=sid)
+            raise
+
+
 NODE_CLASS_MAPPINGS = {
     "SaveWebPToS3": SaveWebPToS3,
     "FantasioDownloadFile": FantasioDownloadFile,
@@ -485,6 +626,9 @@ NODE_CLASS_MAPPINGS = {
     "FantasioLoadImageFromUrl": FantasioLoadImageFromUrl,
     "FantasioDownloadAndExtractArchive": FantasioDownloadAndExtractArchive,
     "FantasioApplyTriggerWord": FantasioApplyTriggerWord,
+    "FantasioUNETLoader": FantasioUNETLoader,
+    "FantasioCLIPLoader": FantasioCLIPLoader,
+    "FantasioVAELoader": FantasioVAELoader,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveWebPToS3": "Save WebP to S3",
@@ -493,5 +637,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FantasioLoadImageFromUrl": "Fantasio Load Image From URL",
     "FantasioDownloadAndExtractArchive": "Fantasio Download And Extract Archive",
     "FantasioApplyTriggerWord": "Fantasio Apply Trigger Word",
+    "FantasioUNETLoader": "Fantasio UNET Loader",
+    "FantasioCLIPLoader": "Fantasio CLIP Loader",
+    "FantasioVAELoader": "Fantasio VAE Loader",
 }
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
