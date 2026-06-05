@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 from server import PromptServer
+import folder_paths
 
 from .lib import create_s3_client, normalize_s3_public_url, download_to_file, download_and_extract_archive, describe_exception
 
@@ -70,6 +71,8 @@ class SaveWebPToS3:
                 "quality": ("INT", {"default": 85, "min": 1, "max": 100}),
                 "thumb_quality": ("INT", {"default": 75, "min": 1, "max": 100}),
                 "thumb_size": ("INT", {"default": 600, "min": 100, "max": 1200}),
+                "convert": ("BOOLEAN", {"default": True}),
+                "upload": ("BOOLEAN", {"default": True}),
             },
             "hidden": {
                 "s3_endpoint": ("STRING",),
@@ -89,32 +92,35 @@ class SaveWebPToS3:
 
     def process(self, images, quality=85, thumb_quality=75, thumb_size=600,
                 s3_endpoint="", s3_access_key="", s3_secret_key="",
-                s3_bucket="", s3_public_url="", client_id="", task_id=0):
+                s3_bucket="", s3_public_url="", client_id="", task_id=0,
+                convert=True, upload=True):
         sid = client_id if client_id else None
+        do_upload = convert and upload
 
         try:
-            missing = [name for name, value in (
-                ("endpoint", s3_endpoint),
-                ("access_key", s3_access_key),
-                ("secret_key", s3_secret_key),
-                ("bucket", s3_bucket),
-                ("public_url", s3_public_url),
-            ) if not value]
-            if missing:
-                raise ValueError(f"S3 credentials missing: {', '.join(missing)}")
+            if do_upload:
+                missing = [name for name, value in (
+                    ("endpoint", s3_endpoint),
+                    ("access_key", s3_access_key),
+                    ("secret_key", s3_secret_key),
+                    ("bucket", s3_bucket),
+                    ("public_url", s3_public_url),
+                ) if not value]
+                if missing:
+                    raise ValueError(f"S3 credentials missing: {', '.join(missing)}")
 
             return self._process_images(images, quality, thumb_quality, thumb_size,
                                         s3_endpoint, s3_access_key, s3_secret_key,
-                                        s3_bucket, s3_public_url, sid, task_id)
+                                        s3_bucket, s3_public_url, sid, task_id, convert, do_upload)
         except Exception as e:
             _send_error(describe_exception(e), "SaveWebPToS3", task_id=task_id, sid=sid)
             raise
 
     def _process_images(self, images, quality, thumb_quality, thumb_size,
                         s3_endpoint, s3_access_key, s3_secret_key,
-                        s3_bucket, s3_public_url, sid, task_id):
+                        s3_bucket, s3_public_url, sid, task_id, convert, do_upload):
 
-        s3 = create_s3_client(s3_endpoint, s3_access_key, s3_secret_key)
+        s3 = create_s3_client(s3_endpoint, s3_access_key, s3_secret_key) if do_upload else None
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [
@@ -122,7 +128,7 @@ class SaveWebPToS3:
                     self._process_single_image,
                     s3, image_tensor, idx,
                     quality, thumb_quality, thumb_size,
-                    s3_bucket, s3_public_url, sid
+                    s3_bucket, s3_public_url, sid, convert, do_upload
                 )
                 for idx, image_tensor in enumerate(images)
             ]
@@ -131,10 +137,15 @@ class SaveWebPToS3:
 
         return {"ui": {"images": []}}
 
-    def _process_single_image(self, s3, image_tensor, idx, quality, thumb_quality, thumb_size, bucket, public_url, sid):
+    def _process_single_image(self, s3, image_tensor, idx, quality, thumb_quality, thumb_size, bucket, public_url, sid, convert, do_upload):
         h, w = image_tensor.shape[:2]
         filename = str(uuid.uuid4())
         orientation = self._get_orientation(w, h)
+
+        if not do_upload:
+            self._save_local_image(image_tensor, w, h, orientation, filename, quality, convert, sid)
+            return
+
         main_key = f"generated/originals/{orientation}/{filename}.webp"
         thumb_key = f"generated/thumbnails/{orientation}/{filename}_thumb.webp"
 
@@ -213,6 +224,28 @@ class SaveWebPToS3:
                     "size_bytes": size_bytes,
                 }, sid)
                 raise e
+
+    def _save_local_image(self, image_tensor, w, h, orientation, filename, quality, convert, sid):
+        output_dir = folder_paths.get_output_directory()
+        img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
+        img = Image.fromarray(img_np)
+
+        if convert:
+            saved_filename = f"{filename}.webp"
+            img.save(os.path.join(output_dir, saved_filename), format='WEBP', quality=quality, method=4)
+            image_format = "webp"
+        else:
+            saved_filename = f"{filename}.png"
+            img.save(os.path.join(output_dir, saved_filename), format='PNG')
+            image_format = "png"
+
+        PromptServer.instance.send_sync("gpu-image-saved", {
+            "filename": saved_filename,
+            "orientation": orientation,
+            "width": w,
+            "height": h,
+            "format": image_format,
+        }, sid)
 
     def _get_orientation(self, w, h):
         if w > h:
