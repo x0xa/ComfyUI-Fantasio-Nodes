@@ -511,6 +511,36 @@ class FantasioApplyTriggerWord:
         return (f"{word}, {text}",)
 
 
+class FantasioSampleCaptionEmitter:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "caption": ("STRING", {"forceInput": True}),
+            },
+            "hidden": {
+                "client_id": ("STRING",),
+                "task_id": ("INT",),
+            }
+        }
+
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    INPUT_IS_LIST = True
+    FUNCTION = "run"
+    CATEGORY = "fantasio"
+
+    def run(self, caption, client_id=None, task_id=None):
+        sid = client_id[0] if isinstance(client_id, list) and client_id else client_id
+        captions = caption if isinstance(caption, list) else [caption]
+        first = next((c.strip() for c in captions if isinstance(c, str) and c.strip()), "")
+
+        if first and sid:
+            PromptServer.instance.send_sync("training.caption.sample", {"caption": first}, sid)
+
+        return {"ui": {}}
+
+
 class FantasioUNETLoader:
     @classmethod
     def INPUT_TYPES(cls):
@@ -659,6 +689,7 @@ NODE_CLASS_MAPPINGS = {
     "FantasioLoadImageFromUrl": FantasioLoadImageFromUrl,
     "FantasioDownloadAndExtractArchive": FantasioDownloadAndExtractArchive,
     "FantasioApplyTriggerWord": FantasioApplyTriggerWord,
+    "FantasioSampleCaptionEmitter": FantasioSampleCaptionEmitter,
     "FantasioUNETLoader": FantasioUNETLoader,
     "FantasioCLIPLoader": FantasioCLIPLoader,
     "FantasioVAELoader": FantasioVAELoader,
@@ -670,6 +701,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FantasioLoadImageFromUrl": "Fantasio Load Image From URL",
     "FantasioDownloadAndExtractArchive": "Fantasio Download And Extract Archive",
     "FantasioApplyTriggerWord": "Fantasio Apply Trigger Word",
+    "FantasioSampleCaptionEmitter": "Fantasio Sample Caption Emitter",
     "FantasioUNETLoader": "Fantasio UNET Loader",
     "FantasioCLIPLoader": "Fantasio CLIP Loader",
     "FantasioVAELoader": "Fantasio VAE Loader",
