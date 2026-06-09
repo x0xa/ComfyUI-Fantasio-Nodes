@@ -42,13 +42,11 @@ def _send_gpu_activity(message, sid=None, value=None, max_value=None, node=None)
     PromptServer.instance.send_sync("fa.gpu.activity", payload, sid)
 
 
-def _send_error(error_message, node_name, task_id=None, sid=None):
+def _send_error(error_message, node_name, sid=None):
     payload = {
         "error": str(error_message),
         "node": node_name,
     }
-    if task_id is not None:
-        payload["task_id"] = int(task_id)
 
     PromptServer.instance.send_sync("fa.node.error", payload, sid)
 
@@ -81,7 +79,6 @@ class SaveWebPToS3:
                 "s3_bucket": ("STRING",),
                 "s3_public_url": ("STRING",),
                 "client_id": ("STRING",),
-                "task_id": ("INT",),
             }
         }
 
@@ -92,7 +89,7 @@ class SaveWebPToS3:
 
     def process(self, images, quality=85, thumb_quality=75, thumb_size=600,
                 s3_endpoint="", s3_access_key="", s3_secret_key="",
-                s3_bucket="", s3_public_url="", client_id="", task_id=0,
+                s3_bucket="", s3_public_url="", client_id="",
                 convert=True, upload=True):
         sid = client_id if client_id else None
         do_upload = convert and upload
@@ -111,14 +108,14 @@ class SaveWebPToS3:
 
             return self._process_images(images, quality, thumb_quality, thumb_size,
                                         s3_endpoint, s3_access_key, s3_secret_key,
-                                        s3_bucket, s3_public_url, sid, task_id, convert, do_upload)
+                                        s3_bucket, s3_public_url, sid, convert, do_upload)
         except Exception as e:
-            _send_error(describe_exception(e), "SaveWebPToS3", task_id=task_id, sid=sid)
+            _send_error(describe_exception(e), "SaveWebPToS3", sid=sid)
             raise
 
     def _process_images(self, images, quality, thumb_quality, thumb_size,
                         s3_endpoint, s3_access_key, s3_secret_key,
-                        s3_bucket, s3_public_url, sid, task_id, convert, do_upload):
+                        s3_bucket, s3_public_url, sid, convert, do_upload):
 
         s3 = create_s3_client(s3_endpoint, s3_access_key, s3_secret_key) if do_upload else None
 
@@ -276,7 +273,6 @@ class FantasioDownloadFile:
             },
             "hidden": {
                 "client_id": ("STRING",),
-                "task_id": ("INT",),
             }
         }
 
@@ -285,7 +281,7 @@ class FantasioDownloadFile:
     FUNCTION = "run"
     CATEGORY = "fantasio/io"
 
-    def run(self, url, output_path, model=None, clip=None, timeout_seconds=60, overwrite=False, return_basename=False, client_id="", task_id=0):
+    def run(self, url, output_path, model=None, clip=None, timeout_seconds=60, overwrite=False, return_basename=False, client_id=""):
         sid = client_id if client_id else None
 
         try:
@@ -299,7 +295,7 @@ class FantasioDownloadFile:
 
             return ((os.path.basename(output_path) if return_basename else output_path), model, clip)
         except Exception as e:
-            _send_error(str(e), "FantasioDownloadFile", task_id=task_id, sid=sid)
+            _send_error(str(e), "FantasioDownloadFile", sid=sid)
             raise
 
 
@@ -316,7 +312,6 @@ class FantasioLoraLoader:
             },
             "hidden": {
                 "client_id": ("STRING",),
-                "task_id": ("INT",),
             }
         }
 
@@ -324,7 +319,7 @@ class FantasioLoraLoader:
     FUNCTION = "run"
     CATEGORY = "loaders"
 
-    def run(self, model, clip, lora_name, strength_model, strength_clip, client_id="", task_id=0):
+    def run(self, model, clip, lora_name, strength_model, strength_clip, client_id=""):
         sid = client_id if client_id else None
 
         try:
@@ -384,7 +379,7 @@ class FantasioLoraLoader:
 
             return (model_lora, clip_lora)
         except Exception as e:
-            _send_error(describe_exception(e), "FantasioLoraLoader", task_id=task_id, sid=sid)
+            _send_error(describe_exception(e), "FantasioLoraLoader", sid=sid)
             raise
 
 
@@ -400,7 +395,6 @@ class FantasioLoadImageFromUrl:
             },
             "hidden": {
                 "client_id": ("STRING",),
-                "task_id": ("INT",),
             }
         }
 
@@ -409,7 +403,7 @@ class FantasioLoadImageFromUrl:
     FUNCTION = "run"
     CATEGORY = "fantasio/io"
 
-    def run(self, url, timeout_seconds=60, client_id="", task_id=0):
+    def run(self, url, timeout_seconds=60, client_id=""):
         sid = client_id if client_id else None
 
         try:
@@ -435,7 +429,7 @@ class FantasioLoadImageFromUrl:
 
             return (image_tensor.unsqueeze(0),)
         except Exception as e:
-            _send_error(f"Failed to load image from {url}: {describe_exception(e)}", "FantasioLoadImageFromUrl", task_id=task_id, sid=sid)
+            _send_error(f"Failed to load image from {url}: {describe_exception(e)}", "FantasioLoadImageFromUrl", sid=sid)
             raise
 
 
@@ -454,7 +448,6 @@ class FantasioDownloadAndExtractArchive:
             },
             "hidden": {
                 "client_id": ("STRING",),
-                "task_id": ("INT",),
             }
         }
 
@@ -463,7 +456,7 @@ class FantasioDownloadAndExtractArchive:
     FUNCTION = "run"
     CATEGORY = "fantasio/io"
 
-    def run(self, url, output_dir, archive_name="", timeout_seconds=300, clean_archive=True, client_id="", task_id=0):
+    def run(self, url, output_dir, archive_name="", timeout_seconds=300, clean_archive=True, client_id=""):
         sid = client_id if client_id else None
 
         try:
@@ -479,7 +472,7 @@ class FantasioDownloadAndExtractArchive:
 
             return (output_dir,)
         except Exception as e:
-            _send_error(str(e), "FantasioDownloadAndExtractArchive", task_id=task_id, sid=sid)
+            _send_error(str(e), "FantasioDownloadAndExtractArchive", sid=sid)
             raise
 
 
@@ -520,7 +513,6 @@ class FantasioSampleCaptionEmitter:
             },
             "hidden": {
                 "client_id": ("STRING",),
-                "task_id": ("INT",),
             }
         }
 
@@ -530,7 +522,7 @@ class FantasioSampleCaptionEmitter:
     FUNCTION = "run"
     CATEGORY = "fantasio"
 
-    def run(self, caption, client_id=None, task_id=None):
+    def run(self, caption, client_id=None):
         sid = client_id[0] if isinstance(client_id, list) and client_id else client_id
         captions = caption if isinstance(caption, list) else [caption]
         first = next((c.strip() for c in captions if isinstance(c, str) and c.strip()), "")
@@ -553,7 +545,6 @@ class FantasioUNETLoader:
             },
             "hidden": {
                 "client_id": ("STRING",),
-                "task_id": ("INT",),
             }
         }
 
@@ -561,7 +552,7 @@ class FantasioUNETLoader:
     FUNCTION = "run"
     CATEGORY = "fantasio/loaders"
 
-    def run(self, unet_name, weight_dtype="default", client_id="", task_id=0):
+    def run(self, unet_name, weight_dtype="default", client_id=""):
         sid = client_id if client_id else None
 
         try:
@@ -586,7 +577,7 @@ class FantasioUNETLoader:
 
             return (model,)
         except Exception as e:
-            _send_error(describe_exception(e), "FantasioUNETLoader", task_id=task_id, sid=sid)
+            _send_error(describe_exception(e), "FantasioUNETLoader", sid=sid)
             raise
 
 
@@ -603,7 +594,6 @@ class FantasioCLIPLoader:
             },
             "hidden": {
                 "client_id": ("STRING",),
-                "task_id": ("INT",),
             }
         }
 
@@ -611,7 +601,7 @@ class FantasioCLIPLoader:
     FUNCTION = "run"
     CATEGORY = "fantasio/loaders"
 
-    def run(self, clip_name, type="stable_diffusion", device="default", client_id="", task_id=0):
+    def run(self, clip_name, type="stable_diffusion", device="default", client_id=""):
         sid = client_id if client_id else None
 
         try:
@@ -638,7 +628,7 @@ class FantasioCLIPLoader:
 
             return (clip,)
         except Exception as e:
-            _send_error(describe_exception(e), "FantasioCLIPLoader", task_id=task_id, sid=sid)
+            _send_error(describe_exception(e), "FantasioCLIPLoader", sid=sid)
             raise
 
 
@@ -651,7 +641,6 @@ class FantasioVAELoader:
             },
             "hidden": {
                 "client_id": ("STRING",),
-                "task_id": ("INT",),
             }
         }
 
@@ -659,7 +648,7 @@ class FantasioVAELoader:
     FUNCTION = "run"
     CATEGORY = "fantasio/loaders"
 
-    def run(self, vae_name, client_id="", task_id=0):
+    def run(self, vae_name, client_id=""):
         sid = client_id if client_id else None
 
         try:
@@ -678,7 +667,7 @@ class FantasioVAELoader:
 
             return (vae,)
         except Exception as e:
-            _send_error(describe_exception(e), "FantasioVAELoader", task_id=task_id, sid=sid)
+            _send_error(describe_exception(e), "FantasioVAELoader", sid=sid)
             raise
 
 
