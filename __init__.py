@@ -2,6 +2,7 @@ import io
 import os
 import time
 import uuid
+import threading
 import urllib.request
 
 import numpy as np
@@ -10,6 +11,7 @@ import torch.nn.functional as F
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 from server import PromptServer
+from nodes import VAEEncode, VAEDecode, CLIPTextEncode
 import folder_paths
 
 from .lib import create_s3_client, normalize_s3_public_url, download_to_file, download_and_extract_archive, describe_exception
@@ -55,6 +57,33 @@ def _download_progress_cb(sid):
     return lambda percent: _send_gpu_activity(
         f"Downloading: {percent}%", sid=sid, value=percent, max_value=100
     )
+
+
+class GpuActivityNotifier:
+    def __init__(self, message, sid, interval=None):
+        self.message = message
+        self.sid = sid
+        self.interval = interval if interval is not None else _GPU_ACTIVITY_INTERVAL_SECONDS
+        self.stop_event = threading.Event()
+        self.thread = None
+
+    def __enter__(self):
+        _send_gpu_activity(self.message, sid=self.sid)
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._loop)
+        self.thread.daemon = True
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2)
+        return False
+
+    def _loop(self):
+        while not self.stop_event.wait(self.interval):
+            _send_gpu_activity(self.message, sid=self.sid)
 
 
 class SaveWebPToS3:
@@ -362,20 +391,19 @@ class FantasioLoraLoader:
                 searched = ", ".join(searched_paths) if searched_paths else "no candidate paths"
                 raise RuntimeError(f"LoRA file not found: {lora_name} (searched: {searched})")
 
-            _send_gpu_activity(f"Loading LoRA {os.path.basename(lora_path)}", sid=sid)
+            with GpuActivityNotifier(f"Applying LoRA {os.path.basename(lora_path)}", sid):
+                try:
+                    lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to read LoRA file {lora_path}: {describe_exception(e)}") from e
 
-            try:
-                lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
-            except Exception as e:
-                raise RuntimeError(f"Failed to read LoRA file {lora_path}: {describe_exception(e)}") from e
-
-            try:
-                model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora, strength_model, strength_clip)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to apply LoRA {os.path.basename(lora_path)} "
-                    f"(strength_model={strength_model}, strength_clip={strength_clip}): {describe_exception(e)}"
-                ) from e
+                try:
+                    model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora, strength_model, strength_clip)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to apply LoRA {os.path.basename(lora_path)} "
+                        f"(strength_model={strength_model}, strength_clip={strength_clip}): {describe_exception(e)}"
+                    ) from e
 
             return (model_lora, clip_lora)
         except Exception as e:
@@ -671,8 +699,71 @@ class FantasioVAELoader:
             raise
 
 
+class FantasioVAEEncode(VAEEncode):
+    @classmethod
+    def INPUT_TYPES(cls):
+        types = VAEEncode.INPUT_TYPES()
+        types.setdefault("hidden", {})["client_id"] = ("STRING",)
+        return types
+
+    FUNCTION = "run"
+    CATEGORY = "fantasio/latent"
+
+    def run(self, pixels, vae, client_id=""):
+        sid = client_id if client_id else None
+        try:
+            with GpuActivityNotifier("Encoding image to latent", sid):
+                return super().encode(vae, pixels)
+        except Exception as e:
+            _send_error(describe_exception(e), "FantasioVAEEncode", sid=sid)
+            raise
+
+
+class FantasioVAEDecode(VAEDecode):
+    @classmethod
+    def INPUT_TYPES(cls):
+        types = VAEDecode.INPUT_TYPES()
+        types.setdefault("hidden", {})["client_id"] = ("STRING",)
+        return types
+
+    FUNCTION = "run"
+    CATEGORY = "fantasio/latent"
+
+    def run(self, samples, vae, client_id=""):
+        sid = client_id if client_id else None
+        try:
+            with GpuActivityNotifier("Decoding latent to image", sid):
+                return super().decode(vae, samples)
+        except Exception as e:
+            _send_error(describe_exception(e), "FantasioVAEDecode", sid=sid)
+            raise
+
+
+class FantasioCLIPTextEncode(CLIPTextEncode):
+    @classmethod
+    def INPUT_TYPES(cls):
+        types = CLIPTextEncode.INPUT_TYPES()
+        types.setdefault("hidden", {})["client_id"] = ("STRING",)
+        return types
+
+    FUNCTION = "run"
+    CATEGORY = "fantasio/conditioning"
+
+    def run(self, text, clip, client_id=""):
+        sid = client_id if client_id else None
+        try:
+            with GpuActivityNotifier("Encoding prompt (text encoder)", sid):
+                return super().encode(clip, text)
+        except Exception as e:
+            _send_error(describe_exception(e), "FantasioCLIPTextEncode", sid=sid)
+            raise
+
+
 NODE_CLASS_MAPPINGS = {
     "SaveWebPToS3": SaveWebPToS3,
+    "FantasioVAEEncode": FantasioVAEEncode,
+    "FantasioVAEDecode": FantasioVAEDecode,
+    "FantasioCLIPTextEncode": FantasioCLIPTextEncode,
     "FantasioDownloadFile": FantasioDownloadFile,
     "FantasioLoraLoader": FantasioLoraLoader,
     "FantasioLoadImageFromUrl": FantasioLoadImageFromUrl,
@@ -685,6 +776,9 @@ NODE_CLASS_MAPPINGS = {
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveWebPToS3": "Save WebP to S3",
+    "FantasioVAEEncode": "Fantasio VAE Encode",
+    "FantasioVAEDecode": "Fantasio VAE Decode",
+    "FantasioCLIPTextEncode": "Fantasio CLIP Text Encode",
     "FantasioDownloadFile": "Fantasio Download File",
     "FantasioLoraLoader": "Fantasio LoRA Loader",
     "FantasioLoadImageFromUrl": "Fantasio Load Image From URL",
