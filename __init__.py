@@ -148,18 +148,19 @@ class SaveWebPToS3:
 
         s3 = create_s3_client(s3_endpoint, s3_access_key, s3_secret_key) if do_upload else None
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [
-                executor.submit(
-                    self._process_single_image,
-                    s3, image_tensor, idx,
-                    quality, thumb_quality, thumb_size,
-                    s3_bucket, s3_public_url, sid, convert, do_upload
-                )
-                for idx, image_tensor in enumerate(images)
-            ]
-            for future in futures:
-                future.result()
+        with GpuActivityNotifier("Saving images to S3" if do_upload else "Saving images", sid):
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [
+                    executor.submit(
+                        self._process_single_image,
+                        s3, image_tensor, idx,
+                        quality, thumb_quality, thumb_size,
+                        s3_bucket, s3_public_url, sid, convert, do_upload
+                    )
+                    for idx, image_tensor in enumerate(images)
+                ]
+                for future in futures:
+                    future.result()
 
         return {"ui": {"images": []}}
 
@@ -318,8 +319,8 @@ class FantasioDownloadFile:
                 _send_gpu_activity(f"File already exists: {output_path}", sid=sid)
                 return ((os.path.basename(output_path) if return_basename else output_path), model, clip)
 
-            _send_gpu_activity(f"Downloading file to {output_path}", sid=sid)
-            download_to_file(url, output_path, timeout_seconds=timeout_seconds, progress_cb=_download_progress_cb(sid))
+            with GpuActivityNotifier(f"Downloading file to {output_path}", sid):
+                download_to_file(url, output_path, timeout_seconds=timeout_seconds, progress_cb=_download_progress_cb(sid))
             _send_gpu_activity(f"Downloaded file to {output_path}", sid=sid)
 
             return ((os.path.basename(output_path) if return_basename else output_path), model, clip)
@@ -435,20 +436,19 @@ class FantasioLoadImageFromUrl:
         sid = client_id if client_id else None
 
         try:
-            _send_gpu_activity("Downloading input image", sid=sid)
+            with GpuActivityNotifier("Downloading input image", sid):
+                request = urllib.request.Request(url, headers={"User-Agent": "fantasio-comfy-node/1.0"})
 
-            request = urllib.request.Request(url, headers={"User-Agent": "fantasio-comfy-node/1.0"})
+                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                    data = response.read()
 
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                data = response.read()
-
-            try:
-                image = Image.open(io.BytesIO(data)).convert("RGB")
-            except Exception as e:
-                raise RuntimeError(
-                    f"Downloaded {len(data)} bytes from {url} but could not decode as an image "
-                    f"(content may be an error page or unsupported format): {describe_exception(e)}"
-                ) from e
+                try:
+                    image = Image.open(io.BytesIO(data)).convert("RGB")
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Downloaded {len(data)} bytes from {url} but could not decode as an image "
+                        f"(content may be an error page or unsupported format): {describe_exception(e)}"
+                    ) from e
 
             image_np = np.array(image).astype(np.float32) / 255.0
             image_tensor = torch.from_numpy(image_np)
@@ -488,14 +488,14 @@ class FantasioDownloadAndExtractArchive:
         sid = client_id if client_id else None
 
         try:
-            _send_gpu_activity("Downloading dataset archive", sid=sid)
-            download_and_extract_archive(
-                url,
-                output_dir,
-                archive_name=archive_name,
-                timeout_seconds=timeout_seconds,
-                progress_cb=_download_progress_cb(sid),
-            )
+            with GpuActivityNotifier("Downloading dataset archive", sid):
+                download_and_extract_archive(
+                    url,
+                    output_dir,
+                    archive_name=archive_name,
+                    timeout_seconds=timeout_seconds,
+                    progress_cb=_download_progress_cb(sid),
+                )
             _send_gpu_activity(f"Dataset extracted to {output_dir}", sid=sid)
 
             return (output_dir,)
@@ -599,8 +599,8 @@ class FantasioUNETLoader:
             unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
             unet_basename = os.path.basename(unet_path)
 
-            _send_gpu_activity(f"Loading diffusion model {unet_basename}", sid=sid)
-            model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
+            with GpuActivityNotifier(f"Loading diffusion model {unet_basename}", sid):
+                model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
             _send_gpu_activity(f"Diffusion model {unet_basename} loaded", sid=sid)
 
             return (model,)
@@ -645,13 +645,13 @@ class FantasioCLIPLoader:
             clip_path = folder_paths.get_full_path_or_raise("text_encoders", clip_name)
             clip_basename = os.path.basename(clip_path)
 
-            _send_gpu_activity(f"Loading text encoder {clip_basename}", sid=sid)
-            clip = comfy.sd.load_clip(
-                ckpt_paths=[clip_path],
-                embedding_directory=folder_paths.get_folder_paths("embeddings"),
-                clip_type=clip_type,
-                model_options=model_options,
-            )
+            with GpuActivityNotifier(f"Loading text encoder {clip_basename}", sid):
+                clip = comfy.sd.load_clip(
+                    ckpt_paths=[clip_path],
+                    embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                    clip_type=clip_type,
+                    model_options=model_options,
+                )
             _send_gpu_activity(f"Text encoder {clip_basename} loaded", sid=sid)
 
             return (clip,)
@@ -687,10 +687,10 @@ class FantasioVAELoader:
             vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
             vae_basename = os.path.basename(vae_path)
 
-            _send_gpu_activity(f"Loading VAE {vae_basename}", sid=sid)
-            sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
-            vae = comfy.sd.VAE(sd=sd, metadata=metadata)
-            vae.throw_exception_if_invalid()
+            with GpuActivityNotifier(f"Loading VAE {vae_basename}", sid):
+                sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
+                vae = comfy.sd.VAE(sd=sd, metadata=metadata)
+                vae.throw_exception_if_invalid()
             _send_gpu_activity(f"VAE {vae_basename} loaded", sid=sid)
 
             return (vae,)
