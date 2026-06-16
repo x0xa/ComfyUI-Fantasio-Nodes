@@ -86,6 +86,29 @@ class GpuActivityNotifier:
             _send_gpu_activity(self.message, sid=self.sid)
 
 
+def _build_thumb_image(image_tensor, w, h, thumb_size):
+    if w > h:
+        thumb_w, thumb_h = thumb_size, int(h * thumb_size / w)
+    else:
+        thumb_h, thumb_w = thumb_size, int(w * thumb_size / h)
+
+    tensor_for_resize = image_tensor.permute(2, 0, 1).unsqueeze(0)
+    thumb_tensor = F.interpolate(tensor_for_resize, size=(thumb_h, thumb_w), mode='bilinear', align_corners=False)
+    thumb_tensor = thumb_tensor.squeeze(0).permute(1, 2, 0)
+    thumb_np = (thumb_tensor.cpu().numpy() * 255).astype(np.uint8)
+
+    return Image.fromarray(thumb_np)
+
+
+def _encode_webp(image, quality, method):
+    buf = io.BytesIO()
+    try:
+        image.save(buf, format='WEBP', quality=quality, method=method)
+        return buf.getvalue()
+    finally:
+        buf.close()
+
+
 class SaveWebPToS3:
 
     @classmethod
@@ -170,38 +193,19 @@ class SaveWebPToS3:
         orientation = self._get_orientation(w, h)
 
         if not do_upload:
-            self._save_local_image(image_tensor, w, h, orientation, filename, quality, convert, sid)
+            self._save_local_image(image_tensor, w, h, orientation, filename, quality, thumb_quality, thumb_size, convert, sid)
             return
 
         main_key = f"generated/originals/{orientation}/{filename}.webp"
         thumb_key = f"generated/thumbnails/{orientation}/{filename}_thumb.webp"
 
-        if w > h:
-            thumb_w, thumb_h = thumb_size, int(h * thumb_size / w)
-        else:
-            thumb_h, thumb_w = thumb_size, int(w * thumb_size / h)
-
-        tensor_for_resize = image_tensor.permute(2, 0, 1).unsqueeze(0)
-        thumb_tensor = F.interpolate(tensor_for_resize, size=(thumb_h, thumb_w), mode='bilinear', align_corners=False)
-        thumb_tensor = thumb_tensor.squeeze(0).permute(1, 2, 0)
-
         img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
-        thumb_np = (thumb_tensor.cpu().numpy() * 255).astype(np.uint8)
-
         img = Image.fromarray(img_np)
-        thumb = Image.fromarray(thumb_np)
-
-        def encode(image, encode_quality, method):
-            buf = io.BytesIO()
-            try:
-                image.save(buf, format='WEBP', quality=encode_quality, method=method)
-                return buf.getvalue()
-            finally:
-                buf.close()
+        thumb = _build_thumb_image(image_tensor, w, h, thumb_size)
 
         with ThreadPoolExecutor(max_workers=2) as enc_executor:
-            main_future = enc_executor.submit(encode, img, quality, 4)
-            thumb_future = enc_executor.submit(encode, thumb, thumb_quality, 2)
+            main_future = enc_executor.submit(_encode_webp, img, quality, 4)
+            thumb_future = enc_executor.submit(_encode_webp, thumb, thumb_quality, 2)
             main_bytes = main_future.result()
             thumb_bytes = thumb_future.result()
 
@@ -252,7 +256,7 @@ class SaveWebPToS3:
                 }, sid)
                 raise e
 
-    def _save_local_image(self, image_tensor, w, h, orientation, filename, quality, convert, sid):
+    def _save_local_image(self, image_tensor, w, h, orientation, filename, quality, thumb_quality, thumb_size, convert, sid):
         output_dir = folder_paths.get_output_directory()
         img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
         img = Image.fromarray(img_np)
@@ -266,13 +270,21 @@ class SaveWebPToS3:
             img.save(os.path.join(output_dir, saved_filename), format='PNG')
             image_format = "png"
 
-        PromptServer.instance.send_sync("gpu-image-saved", {
+        payload = {
             "filename": saved_filename,
             "orientation": orientation,
             "width": w,
             "height": h,
             "format": image_format,
-        }, sid)
+        }
+
+        if convert:
+            thumb = _build_thumb_image(image_tensor, w, h, thumb_size)
+            thumb_filename = f"{filename}_thumb.webp"
+            thumb.save(os.path.join(output_dir, thumb_filename), format='WEBP', quality=thumb_quality, method=2)
+            payload["thumb_filename"] = thumb_filename
+
+        PromptServer.instance.send_sync("gpu-image-saved", payload, sid)
 
     def _get_orientation(self, w, h):
         if w > h:
