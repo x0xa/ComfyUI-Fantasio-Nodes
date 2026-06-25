@@ -310,6 +310,7 @@ class FantasioDownloadFile:
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
                 "timeout_seconds": ("INT", {"default": 60, "min": 5, "max": 3600}),
+                "deadline_seconds": ("INT", {"default": 0, "min": 0, "max": 3600}),
                 "overwrite": ("BOOLEAN", {"default": False}),
                 "return_basename": ("BOOLEAN", {"default": False}),
             },
@@ -323,7 +324,7 @@ class FantasioDownloadFile:
     FUNCTION = "run"
     CATEGORY = "fantasio/io"
 
-    def run(self, url, output_path, model=None, clip=None, timeout_seconds=60, overwrite=False, return_basename=False, client_id=""):
+    def run(self, url, output_path, model=None, clip=None, timeout_seconds=60, deadline_seconds=0, overwrite=False, return_basename=False, client_id=""):
         sid = client_id if client_id else None
 
         try:
@@ -332,7 +333,7 @@ class FantasioDownloadFile:
                 return ((os.path.basename(output_path) if return_basename else output_path), model, clip)
 
             with GpuActivityNotifier(f"Downloading file to {output_path}", sid):
-                download_to_file(url, output_path, timeout_seconds=timeout_seconds, progress_cb=_download_progress_cb(sid))
+                download_to_file(url, output_path, timeout_seconds=timeout_seconds, progress_cb=_download_progress_cb(sid), deadline_seconds=(deadline_seconds or None))
             _send_gpu_activity(f"Downloaded file to {output_path}", sid=sid)
 
             return ((os.path.basename(output_path) if return_basename else output_path), model, clip)

@@ -22,6 +22,10 @@ UPLOAD_MAX_RETRIES = 3
 UPLOAD_RETRY_DELAY_SECONDS = 3
 
 
+class DownloadDeadlineExceeded(Exception):
+    pass
+
+
 def describe_exception(error):
     text = str(error).strip()
     name = type(error).__name__
@@ -59,15 +63,21 @@ def content_type_for(filename):
     return 'image/webp' if filename.lower().endswith('.webp') else 'application/octet-stream'
 
 
-def download_to_file(url, output_path, timeout_seconds=60, progress_cb=None):
+def download_to_file(url, output_path, timeout_seconds=60, progress_cb=None, deadline_seconds=None):
     request = urllib.request.Request(url, headers={"User-Agent": "fantasio-comfy-node/1.0"})
 
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
+    socket_timeout = timeout_seconds
+    if deadline_seconds is not None:
+        socket_timeout = min(timeout_seconds, deadline_seconds)
+
+    started_at = time.monotonic()
+
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with urllib.request.urlopen(request, timeout=socket_timeout) as response:
             total = response.headers.get("Content-Length")
             total_bytes = int(total) if total else None
             downloaded = 0
@@ -75,6 +85,11 @@ def download_to_file(url, output_path, timeout_seconds=60, progress_cb=None):
 
             with open(output_path, "wb") as output_file:
                 while True:
+                    if deadline_seconds is not None and time.monotonic() - started_at > deadline_seconds:
+                        raise DownloadDeadlineExceeded(
+                            f"Download exceeded {deadline_seconds}s wall-clock limit for {url}"
+                        )
+
                     chunk = response.read(DOWNLOAD_CHUNK_SIZE)
                     if not chunk:
                         break
@@ -90,6 +105,9 @@ def download_to_file(url, output_path, timeout_seconds=60, progress_cb=None):
 
             if progress_cb:
                 progress_cb(100)
+    except DownloadDeadlineExceeded:
+        _remove_if_exists(output_path)
+        raise
     except HTTPError as e:
         _remove_if_exists(output_path)
         raise RuntimeError(f"HTTP error downloading {url}: {e.code} {e.reason}") from e
