@@ -1,15 +1,16 @@
 import io
 import os
+import ssl
 import time
 import uuid
+import errno
 import shutil
 import socket
 import tarfile
 import zipfile
 import tempfile
+import http.client
 import urllib.parse
-import urllib.request
-from urllib.error import URLError, HTTPError
 
 import boto3
 import numpy as np
@@ -20,9 +21,38 @@ from botocore.exceptions import BotoCoreError, ClientError
 DOWNLOAD_CHUNK_SIZE = 1024 * 512
 UPLOAD_MAX_RETRIES = 3
 UPLOAD_RETRY_DELAY_SECONDS = 3
+DOWNLOAD_USER_AGENT = "fantasio-comfy-node/1.0"
+CONNECT_TIMEOUT_SECONDS = 5
+CONNECT_ATTEMPTS = 2
+EGRESS_PROBE_HOST = "1.1.1.1"
+EGRESS_PROBE_PORT = 443
+EGRESS_PROBE_TIMEOUT_SECONDS = 1
+
+EGRESS_ERRNOS = frozenset({
+    errno.EHOSTUNREACH,
+    errno.ENETUNREACH,
+    errno.ENETDOWN,
+    errno.ECONNRESET,
+    errno.ECONNREFUSED,
+    errno.ECONNABORTED,
+    errno.EPIPE,
+})
+
+RESOLVER_FAILURE_ERRNOS = frozenset(
+    code for code in (
+        getattr(socket, 'EAI_AGAIN', None),
+        getattr(socket, 'EAI_FAIL', None),
+        getattr(socket, 'EAI_NODATA', None),
+        getattr(socket, 'EAI_SYSTEM', None),
+    ) if code is not None
+)
 
 
 class DownloadDeadlineExceeded(Exception):
+    pass
+
+
+class InstanceEgressUnavailable(Exception):
     pass
 
 
@@ -63,63 +93,173 @@ def content_type_for(filename):
     return 'image/webp' if filename.lower().endswith('.webp') else 'application/octet-stream'
 
 
-def download_to_file(url, output_path, timeout_seconds=60, progress_cb=None, deadline_seconds=None):
-    request = urllib.request.Request(url, headers={"User-Agent": "fantasio-comfy-node/1.0"})
+def _is_resolver_failure(error):
+    return isinstance(error, socket.gaierror) and error.errno in RESOLVER_FAILURE_ERRNOS
 
+
+def _is_transport_error(error):
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return False
+
+    if isinstance(error, socket.gaierror):
+        return _is_resolver_failure(error)
+
+    if isinstance(error, (socket.timeout, TimeoutError, ssl.SSLError, http.client.HTTPException)):
+        return True
+
+    return isinstance(error, OSError) and error.errno in EGRESS_ERRNOS
+
+
+def _egress_probe_reachable():
+    try:
+        with socket.create_connection((EGRESS_PROBE_HOST, EGRESS_PROBE_PORT), timeout=EGRESS_PROBE_TIMEOUT_SECONDS):
+            return True
+    except OSError:
+        return False
+
+
+def _raise_transfer_failure(url, error):
+    if isinstance(error, socket.gaierror) and not _is_resolver_failure(error):
+        raise RuntimeError(f"Hostname does not resolve for {url}: {describe_exception(error)}") from error
+
+    if not _is_transport_error(error):
+        raise RuntimeError(f"Failed to download {url}: {describe_exception(error)}") from error
+
+    if _is_resolver_failure(error):
+        raise InstanceEgressUnavailable(
+            f"Instance DNS resolution failed for {url}: {describe_exception(error)}"
+        ) from error
+
+    if _egress_probe_reachable():
+        raise RuntimeError(
+            f"Origin unreachable while instance egress is healthy for {url}: {describe_exception(error)}"
+        ) from error
+
+    raise InstanceEgressUnavailable(
+        f"Instance egress unavailable for {url}, probe {EGRESS_PROBE_HOST}:{EGRESS_PROBE_PORT} also unreachable: "
+        f"{describe_exception(error)}"
+    ) from error
+
+
+def _create_connection(parsed, connect_timeout):
+    if parsed.scheme == 'https':
+        return http.client.HTTPSConnection(
+            parsed.hostname,
+            parsed.port,
+            timeout=connect_timeout,
+            context=ssl.create_default_context(),
+        )
+
+    if parsed.scheme == 'http':
+        return http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=connect_timeout)
+
+    raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+
+
+def _request_target(parsed):
+    target = parsed.path or '/'
+
+    if parsed.query:
+        return f"{target}?{parsed.query}"
+
+    return target
+
+
+def _open_response(url, read_timeout):
+    parsed = urllib.parse.urlsplit(url)
+    connect_timeout = min(CONNECT_TIMEOUT_SECONDS, read_timeout)
+    last_error = None
+
+    for attempt in range(CONNECT_ATTEMPTS):
+        connection = _create_connection(parsed, connect_timeout)
+
+        try:
+            connection.connect()
+            connection.sock.settimeout(read_timeout)
+            connection.request('GET', _request_target(parsed), headers={'User-Agent': DOWNLOAD_USER_AGENT})
+            response = connection.getresponse()
+        except Exception as error:
+            connection.close()
+
+            if not _is_transport_error(error) or attempt == CONNECT_ATTEMPTS - 1:
+                _raise_transfer_failure(url, error)
+
+            last_error = error
+            continue
+
+        if response.status != 200:
+            status, reason = response.status, response.reason
+            connection.close()
+            raise RuntimeError(f"HTTP error downloading {url}: {status} {reason}")
+
+        return connection, response
+
+    _raise_transfer_failure(url, last_error)
+
+
+def _consume_response(response, url, write_chunk, progress_cb, deadline_seconds, started_at):
+    total = response.getheader('Content-Length')
+    total_bytes = int(total) if total else None
+    downloaded = 0
+    last_percent = 0
+
+    while True:
+        if deadline_seconds is not None and time.monotonic() - started_at > deadline_seconds:
+            raise DownloadDeadlineExceeded(f"Download exceeded {deadline_seconds}s wall-clock limit for {url}")
+
+        try:
+            chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+        except Exception as error:
+            _raise_transfer_failure(url, error)
+
+        if not chunk:
+            break
+
+        write_chunk(chunk)
+        downloaded += len(chunk)
+
+        if total_bytes and progress_cb:
+            percent = int((downloaded / total_bytes) * 100)
+            if percent > last_percent and percent < 100:
+                progress_cb(percent)
+                last_percent = percent
+
+    if progress_cb:
+        progress_cb(100)
+
+
+def download_to_file(url, output_path, timeout_seconds=60, progress_cb=None, deadline_seconds=None):
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    socket_timeout = timeout_seconds
+    read_timeout = timeout_seconds
     if deadline_seconds is not None:
-        socket_timeout = min(timeout_seconds, deadline_seconds)
+        read_timeout = min(timeout_seconds, deadline_seconds)
 
     started_at = time.monotonic()
+    connection, response = _open_response(url, read_timeout)
 
     try:
-        with urllib.request.urlopen(request, timeout=socket_timeout) as response:
-            total = response.headers.get("Content-Length")
-            total_bytes = int(total) if total else None
-            downloaded = 0
-            last_percent = 0
-
-            with open(output_path, "wb") as output_file:
-                while True:
-                    if deadline_seconds is not None and time.monotonic() - started_at > deadline_seconds:
-                        raise DownloadDeadlineExceeded(
-                            f"Download exceeded {deadline_seconds}s wall-clock limit for {url}"
-                        )
-
-                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
-                    if not chunk:
-                        break
-
-                    output_file.write(chunk)
-                    downloaded += len(chunk)
-
-                    if total_bytes and progress_cb:
-                        percent = int((downloaded / total_bytes) * 100)
-                        if percent > last_percent and percent < 100:
-                            progress_cb(percent)
-                            last_percent = percent
-
-            if progress_cb:
-                progress_cb(100)
-    except DownloadDeadlineExceeded:
+        with open(output_path, 'wb') as output_file:
+            _consume_response(response, url, output_file.write, progress_cb, deadline_seconds, started_at)
+    except Exception:
         _remove_if_exists(output_path)
         raise
-    except HTTPError as e:
-        _remove_if_exists(output_path)
-        raise RuntimeError(f"HTTP error downloading {url}: {e.code} {e.reason}") from e
-    except URLError as e:
-        _remove_if_exists(output_path)
-        raise RuntimeError(f"URL error downloading {url}: {e.reason}") from e
-    except socket.timeout:
-        _remove_if_exists(output_path)
-        raise RuntimeError(f"Timeout downloading {url} after {timeout_seconds}s")
-    except Exception as e:
-        _remove_if_exists(output_path)
-        raise RuntimeError(f"Failed to download {url}: {e}") from e
+    finally:
+        connection.close()
+
+
+def download_bytes(url, timeout_seconds=60, progress_cb=None):
+    connection, response = _open_response(url, timeout_seconds)
+    buffer = io.BytesIO()
+
+    try:
+        _consume_response(response, url, buffer.write, progress_cb, None, time.monotonic())
+    finally:
+        connection.close()
+
+    return buffer.getvalue()
 
 
 def _remove_if_exists(path):

@@ -3,7 +3,6 @@ import os
 import time
 import uuid
 import threading
-import urllib.request
 
 import numpy as np
 import torch
@@ -14,7 +13,7 @@ from server import PromptServer
 from nodes import VAEEncode, VAEDecode, CLIPTextEncode
 import folder_paths
 
-from .lib import create_s3_client, normalize_s3_public_url, download_to_file, download_and_extract_archive, describe_exception
+from .lib import create_s3_client, normalize_s3_public_url, download_to_file, download_bytes, download_and_extract_archive, describe_exception
 
 _GPU_ACTIVITY_LAST_SENT_AT = {}
 _GPU_ACTIVITY_INTERVAL_SECONDS = max(0.5, float(os.environ.get("FANTASIO_GPU_ACTIVITY_INTERVAL_SECONDS", "5.0")))
@@ -450,10 +449,7 @@ class FantasioLoadImageFromUrl:
 
         try:
             with GpuActivityNotifier("Downloading input image", sid):
-                request = urllib.request.Request(url, headers={"User-Agent": "fantasio-comfy-node/1.0"})
-
-                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                    data = response.read()
+                data = download_bytes(url, timeout_seconds=timeout_seconds)
 
                 try:
                     image = Image.open(io.BytesIO(data)).convert("RGB")
