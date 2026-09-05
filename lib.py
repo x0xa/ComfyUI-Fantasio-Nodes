@@ -24,6 +24,8 @@ UPLOAD_RETRY_DELAY_SECONDS = 3
 DOWNLOAD_USER_AGENT = "fantasio-comfy-node/1.0"
 CONNECT_TIMEOUT_SECONDS = 5
 CONNECT_ATTEMPTS = 2
+MAX_REDIRECT_HOPS = 5
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 EGRESS_PROBE_HOST = "1.1.1.1"
 EGRESS_PROBE_PORT = 443
 EGRESS_PROBE_TIMEOUT_SECONDS = 1
@@ -165,8 +167,8 @@ def _request_target(parsed):
     return target
 
 
-def _open_response(url, read_timeout):
-    parsed = urllib.parse.urlsplit(url)
+def _open_hop(url, hop_url, read_timeout):
+    parsed = urllib.parse.urlsplit(hop_url)
     connect_timeout = min(CONNECT_TIMEOUT_SECONDS, read_timeout)
     last_error = None
 
@@ -177,7 +179,7 @@ def _open_response(url, read_timeout):
             connection.connect()
             connection.sock.settimeout(read_timeout)
             connection.request('GET', _request_target(parsed), headers={'User-Agent': DOWNLOAD_USER_AGENT})
-            response = connection.getresponse()
+            return connection, connection.getresponse(), parsed.hostname
         except Exception as error:
             connection.close()
 
@@ -185,16 +187,32 @@ def _open_response(url, read_timeout):
                 _raise_transfer_failure(url, error)
 
             last_error = error
-            continue
-
-        if response.status != 200:
-            status, reason = response.status, response.reason
-            connection.close()
-            raise RuntimeError(f"HTTP error downloading {url}: {status} {reason}")
-
-        return connection, response
 
     _raise_transfer_failure(url, last_error)
+
+
+def _open_response(url, read_timeout):
+    hop_url = url
+
+    for _ in range(MAX_REDIRECT_HOPS + 1):
+        connection, response, hostname = _open_hop(url, hop_url, read_timeout)
+
+        if response.status == 200:
+            return connection, response
+
+        status, reason = response.status, response.reason
+        location = response.getheader('Location') if status in REDIRECT_STATUSES else None
+        connection.close()
+
+        if status in REDIRECT_STATUSES and not location:
+            raise RuntimeError(f"Redirect without a target downloading {url}: {status} {reason} from {hostname}")
+
+        if not location:
+            raise RuntimeError(f"HTTP error downloading {url}: {status} {reason} from {hostname}")
+
+        hop_url = urllib.parse.urljoin(hop_url, location)
+
+    raise RuntimeError(f"Exceeded {MAX_REDIRECT_HOPS} redirects downloading {url}")
 
 
 def _consume_response(response, url, write_chunk, progress_cb, deadline_seconds, started_at):
