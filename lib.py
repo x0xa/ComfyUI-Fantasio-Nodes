@@ -50,10 +50,6 @@ RESOLVER_FAILURE_ERRNOS = frozenset(
 )
 
 
-class DownloadDeadlineExceeded(Exception):
-    pass
-
-
 class InstanceEgressUnavailable(Exception):
     pass
 
@@ -215,16 +211,13 @@ def _open_response(url, read_timeout):
     raise RuntimeError(f"Exceeded {MAX_REDIRECT_HOPS} redirects downloading {url}")
 
 
-def _consume_response(response, url, write_chunk, progress_cb, deadline_seconds, started_at):
+def _consume_response(response, url, write_chunk, progress_cb):
     total = response.getheader('Content-Length')
     total_bytes = int(total) if total else None
     downloaded = 0
     last_percent = 0
 
     while True:
-        if deadline_seconds is not None and time.monotonic() - started_at > deadline_seconds:
-            raise DownloadDeadlineExceeded(f"Download exceeded {deadline_seconds}s wall-clock limit for {url}")
-
         try:
             chunk = response.read(DOWNLOAD_CHUNK_SIZE)
         except Exception as error:
@@ -246,21 +239,16 @@ def _consume_response(response, url, write_chunk, progress_cb, deadline_seconds,
         progress_cb(100)
 
 
-def download_to_file(url, output_path, timeout_seconds=60, progress_cb=None, deadline_seconds=None):
+def download_to_file(url, output_path, timeout_seconds=60, progress_cb=None):
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    read_timeout = timeout_seconds
-    if deadline_seconds is not None:
-        read_timeout = min(timeout_seconds, deadline_seconds)
-
-    started_at = time.monotonic()
-    connection, response = _open_response(url, read_timeout)
+    connection, response = _open_response(url, timeout_seconds)
 
     try:
         with open(output_path, 'wb') as output_file:
-            _consume_response(response, url, output_file.write, progress_cb, deadline_seconds, started_at)
+            _consume_response(response, url, output_file.write, progress_cb)
     except Exception:
         _remove_if_exists(output_path)
         raise
@@ -273,7 +261,7 @@ def download_bytes(url, timeout_seconds=60, progress_cb=None):
     buffer = io.BytesIO()
 
     try:
-        _consume_response(response, url, buffer.write, progress_cb, None, time.monotonic())
+        _consume_response(response, url, buffer.write, progress_cb)
     finally:
         connection.close()
 
