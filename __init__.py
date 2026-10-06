@@ -14,6 +14,7 @@ from nodes import VAEEncode, VAEDecode, CLIPTextEncode
 import folder_paths
 
 from .lib import create_s3_client, normalize_s3_public_url, download_to_file, download_bytes, download_and_extract_archive, describe_exception
+from .restore_edit import restore_edit
 
 _GPU_ACTIVITY_LAST_SENT_AT = {}
 _GPU_ACTIVITY_INTERVAL_SECONDS = max(0.5, float(os.environ.get("FANTASIO_GPU_ACTIVITY_INTERVAL_SECONDS", "5.0")))
@@ -767,8 +768,64 @@ class FantasioCLIPTextEncode(CLIPTextEncode):
             raise
 
 
+def _image_to_array(image_tensor, size):
+    array = image_tensor.detach().cpu().numpy().astype(np.float32)
+    if (array.shape[1], array.shape[0]) == size:
+        return array
+    resized = Image.fromarray((np.clip(array, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)).resize(size, Image.LANCZOS)
+    return np.asarray(resized, dtype=np.float32) / 255.0
+
+
+def _mask_to_array(mask_tensor, size):
+    mask = mask_tensor.detach().cpu().numpy().astype(np.float32)
+    if mask.ndim == 3:
+        mask = mask[0]
+    if (mask.shape[1], mask.shape[0]) != size:
+        mask = np.asarray(Image.fromarray((np.clip(mask, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)).resize(size, Image.NEAREST), dtype=np.float32) / 255.0
+    return (mask > 0.5).astype(np.float32)
+
+
+class FantasioRestoreEdit:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "generated": ("IMAGE",),
+                "original": ("IMAGE",),
+                "mask": ("MASK",),
+            },
+            "hidden": {
+                "client_id": ("STRING",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "run"
+    CATEGORY = "fantasio/image"
+
+    def run(self, generated, original, mask, client_id=""):
+        sid = client_id if client_id else None
+
+        try:
+            with GpuActivityNotifier("Blending the edit into the photo", sid):
+                restored = []
+                for frame in generated:
+                    size = (frame.shape[1], frame.shape[0])
+                    frame_array = frame.detach().cpu().numpy().astype(np.float32)
+                    original_array = _image_to_array(original[0], size)
+                    user_mask = _mask_to_array(mask, size)
+                    restored.append(torch.from_numpy(restore_edit(frame_array, original_array, user_mask).astype(np.float32)))
+
+            return (torch.stack(restored),)
+        except Exception as e:
+            _send_error(f"Failed to blend the edit into the photo: {describe_exception(e)}", "FantasioRestoreEdit", sid=sid)
+            raise
+
+
 NODE_CLASS_MAPPINGS = {
     "SaveWebPToS3": SaveWebPToS3,
+    "FantasioRestoreEdit": FantasioRestoreEdit,
     "FantasioVAEEncode": FantasioVAEEncode,
     "FantasioVAEDecode": FantasioVAEDecode,
     "FantasioCLIPTextEncode": FantasioCLIPTextEncode,
@@ -784,6 +841,7 @@ NODE_CLASS_MAPPINGS = {
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveWebPToS3": "Save WebP to S3",
+    "FantasioRestoreEdit": "Fantasio Restore Edit",
     "FantasioVAEEncode": "Fantasio VAE Encode",
     "FantasioVAEDecode": "Fantasio VAE Decode",
     "FantasioCLIPTextEncode": "Fantasio CLIP Text Encode",
