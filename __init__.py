@@ -1,8 +1,6 @@
 import io
 import os
-import time
 import uuid
-import threading
 
 import numpy as np
 import torch
@@ -13,35 +11,8 @@ from server import PromptServer
 from nodes import VAEEncode, VAEDecode, CLIPTextEncode
 import folder_paths
 
-from .lib import create_s3_client, normalize_s3_public_url, download_to_file, download_bytes, download_and_extract_archive, describe_exception
+from .lib import create_s3_client, normalize_s3_public_url, download_to_file, download_bytes, download_and_extract_archive, describe_exception, send_gpu_activity, GpuActivityNotifier
 from .restore_edit import restore_edit
-
-_GPU_ACTIVITY_LAST_SENT_AT = {}
-_GPU_ACTIVITY_INTERVAL_SECONDS = max(0.5, float(os.environ.get("FANTASIO_GPU_ACTIVITY_INTERVAL_SECONDS", "5.0")))
-
-
-def _send_gpu_activity(message, sid=None, value=None, max_value=None, node=None):
-    if sid is not None and value is not None and max_value is not None:
-        is_terminal_progress = float(value) >= float(max_value)
-        if not is_terminal_progress:
-            now = time.monotonic()
-            last_sent_at = _GPU_ACTIVITY_LAST_SENT_AT.get(sid, 0.0)
-            if now - last_sent_at < _GPU_ACTIVITY_INTERVAL_SECONDS:
-                return
-            _GPU_ACTIVITY_LAST_SENT_AT[sid] = now
-
-    payload = {"message": message}
-
-    if value is not None:
-        payload["value"] = value
-
-    if max_value is not None:
-        payload["max"] = max_value
-
-    if node is not None:
-        payload["node"] = node
-
-    PromptServer.instance.send_sync("fa.gpu.activity", payload, sid)
 
 
 def _send_error(error_message, node_name, sid=None):
@@ -54,36 +25,9 @@ def _send_error(error_message, node_name, sid=None):
 
 
 def _download_progress_cb(sid):
-    return lambda percent: _send_gpu_activity(
+    return lambda percent: send_gpu_activity(
         f"Downloading: {percent}%", sid=sid, value=percent, max_value=100
     )
-
-
-class GpuActivityNotifier:
-    def __init__(self, message, sid, interval=None):
-        self.message = message
-        self.sid = sid
-        self.interval = interval if interval is not None else _GPU_ACTIVITY_INTERVAL_SECONDS
-        self.stop_event = threading.Event()
-        self.thread = None
-
-    def __enter__(self):
-        _send_gpu_activity(self.message, sid=self.sid)
-        self.stop_event.clear()
-        self.thread = threading.Thread(target=self._loop)
-        self.thread.daemon = True
-        self.thread.start()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop_event.set()
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=2)
-        return False
-
-    def _loop(self):
-        while not self.stop_event.wait(self.interval):
-            _send_gpu_activity(self.message, sid=self.sid)
 
 
 def _build_thumb_image(image_tensor, w, h, thumb_size):
@@ -328,12 +272,12 @@ class FantasioDownloadFile:
 
         try:
             if not overwrite and os.path.isfile(output_path):
-                _send_gpu_activity(f"File already exists: {output_path}", sid=sid)
+                send_gpu_activity(f"File already exists: {output_path}", sid=sid)
                 return ((os.path.basename(output_path) if return_basename else output_path), model, clip)
 
             with GpuActivityNotifier(f"Downloading file to {output_path}", sid):
                 download_to_file(url, output_path, timeout_seconds=timeout_seconds, progress_cb=_download_progress_cb(sid))
-            _send_gpu_activity(f"Downloaded file to {output_path}", sid=sid)
+            send_gpu_activity(f"Downloaded file to {output_path}", sid=sid)
 
             return ((os.path.basename(output_path) if return_basename else output_path), model, clip)
         except Exception as e:
@@ -462,7 +406,7 @@ class FantasioLoadImageFromUrl:
             image_np = np.array(image).astype(np.float32) / 255.0
             image_tensor = torch.from_numpy(image_np)
 
-            _send_gpu_activity("Input image loaded", sid=sid)
+            send_gpu_activity("Input image loaded", sid=sid)
 
             return (image_tensor.unsqueeze(0),)
         except Exception as e:
@@ -505,7 +449,7 @@ class FantasioDownloadAndExtractArchive:
                     timeout_seconds=timeout_seconds,
                     progress_cb=_download_progress_cb(sid),
                 )
-            _send_gpu_activity(f"Dataset extracted to {output_dir}", sid=sid)
+            send_gpu_activity(f"Dataset extracted to {output_dir}", sid=sid)
 
             return (output_dir,)
         except Exception as e:
@@ -610,7 +554,7 @@ class FantasioUNETLoader:
 
             with GpuActivityNotifier(f"Loading diffusion model {unet_basename}", sid):
                 model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
-            _send_gpu_activity(f"Diffusion model {unet_basename} loaded", sid=sid)
+            send_gpu_activity(f"Diffusion model {unet_basename} loaded", sid=sid)
 
             return (model,)
         except Exception as e:
@@ -661,7 +605,7 @@ class FantasioCLIPLoader:
                     clip_type=clip_type,
                     model_options=model_options,
                 )
-            _send_gpu_activity(f"Text encoder {clip_basename} loaded", sid=sid)
+            send_gpu_activity(f"Text encoder {clip_basename} loaded", sid=sid)
 
             return (clip,)
         except Exception as e:
@@ -700,7 +644,7 @@ class FantasioVAELoader:
                 sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
                 vae = comfy.sd.VAE(sd=sd, metadata=metadata)
                 vae.throw_exception_if_invalid()
-            _send_gpu_activity(f"VAE {vae_basename} loaded", sid=sid)
+            send_gpu_activity(f"VAE {vae_basename} loaded", sid=sid)
 
             return (vae,)
         except Exception as e:

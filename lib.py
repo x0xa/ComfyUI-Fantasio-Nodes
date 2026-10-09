@@ -9,6 +9,7 @@ import socket
 import tarfile
 import zipfile
 import tempfile
+import threading
 import http.client
 import urllib.parse
 
@@ -50,8 +51,65 @@ RESOLVER_FAILURE_ERRNOS = frozenset(
 )
 
 
+_GPU_ACTIVITY_LAST_SENT_AT = {}
+_GPU_ACTIVITY_INTERVAL_SECONDS = max(0.5, float(os.environ.get("FANTASIO_GPU_ACTIVITY_INTERVAL_SECONDS", "5.0")))
+
+
 class InstanceEgressUnavailable(Exception):
     pass
+
+
+def send_gpu_activity(message, sid=None, value=None, max_value=None, node=None):
+    from server import PromptServer
+
+    if sid is not None and value is not None and max_value is not None:
+        is_terminal_progress = float(value) >= float(max_value)
+        if not is_terminal_progress:
+            now = time.monotonic()
+            last_sent_at = _GPU_ACTIVITY_LAST_SENT_AT.get(sid, 0.0)
+            if now - last_sent_at < _GPU_ACTIVITY_INTERVAL_SECONDS:
+                return
+            _GPU_ACTIVITY_LAST_SENT_AT[sid] = now
+
+    payload = {"message": message}
+
+    if value is not None:
+        payload["value"] = value
+
+    if max_value is not None:
+        payload["max"] = max_value
+
+    if node is not None:
+        payload["node"] = node
+
+    PromptServer.instance.send_sync("fa.gpu.activity", payload, sid)
+
+
+class GpuActivityNotifier:
+    def __init__(self, message, sid, interval=None):
+        self.message = message
+        self.sid = sid
+        self.interval = interval if interval is not None else _GPU_ACTIVITY_INTERVAL_SECONDS
+        self.stop_event = threading.Event()
+        self.thread = None
+
+    def __enter__(self):
+        send_gpu_activity(self.message, sid=self.sid)
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._loop)
+        self.thread.daemon = True
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2)
+        return False
+
+    def _loop(self):
+        while not self.stop_event.wait(self.interval):
+            send_gpu_activity(self.message, sid=self.sid)
 
 
 def describe_exception(error):
