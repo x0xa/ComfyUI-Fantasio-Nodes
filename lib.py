@@ -1,6 +1,7 @@
 import io
 import os
 import ssl
+import json
 import time
 import uuid
 import errno
@@ -179,7 +180,7 @@ def _raise_transfer_failure(url, error):
         raise RuntimeError(f"Hostname does not resolve for {url}: {describe_exception(error)}") from error
 
     if not _is_transport_error(error):
-        raise RuntimeError(f"Failed to download {url}: {describe_exception(error)}") from error
+        raise RuntimeError(f"Request to {url} failed: {describe_exception(error)}") from error
 
     if _is_resolver_failure(error):
         raise InstanceEgressUnavailable(
@@ -324,6 +325,35 @@ def download_bytes(url, timeout_seconds=60, progress_cb=None):
         connection.close()
 
     return buffer.getvalue()
+
+
+def post_json(url, payload, headers=None, timeout_seconds=60):
+    parsed = urllib.parse.urlsplit(url)
+    connect_timeout = min(CONNECT_TIMEOUT_SECONDS, timeout_seconds)
+    request_headers = {
+        'User-Agent': DOWNLOAD_USER_AGENT,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        **(headers or {}),
+    }
+    connection = _create_connection(parsed, connect_timeout)
+
+    try:
+        connection.connect()
+        connection.sock.settimeout(timeout_seconds)
+        connection.request(
+            'POST',
+            _request_target(parsed),
+            body=json.dumps(payload).encode('utf-8'),
+            headers=request_headers,
+        )
+        response = connection.getresponse()
+
+        return response.status, response.read()
+    except Exception as error:
+        _raise_transfer_failure(url, error)
+    finally:
+        connection.close()
 
 
 def _remove_if_exists(path):
