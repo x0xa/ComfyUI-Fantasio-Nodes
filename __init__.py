@@ -457,63 +457,6 @@ class FantasioDownloadAndExtractArchive:
             raise
 
 
-class FantasioApplyTriggerWord:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "caption": ("STRING", {"forceInput": True}),
-                "trigger_word": ("STRING", {"default": ""}),
-            }
-        }
-
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("caption",)
-    FUNCTION = "run"
-    CATEGORY = "fantasio"
-
-    def run(self, caption, trigger_word=""):
-        text = caption.strip() if isinstance(caption, str) else ""
-        word = trigger_word.strip() if isinstance(trigger_word, str) else ""
-
-        if not word:
-            return (text,)
-
-        if not text:
-            return (word,)
-
-        return (f"{word}, {text}",)
-
-
-class FantasioSampleCaptionEmitter:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "caption": ("STRING", {"forceInput": True}),
-            },
-            "hidden": {
-                "client_id": ("STRING",),
-            }
-        }
-
-    RETURN_TYPES = ()
-    OUTPUT_NODE = True
-    INPUT_IS_LIST = True
-    FUNCTION = "run"
-    CATEGORY = "fantasio"
-
-    def run(self, caption, client_id=None):
-        sid = client_id[0] if isinstance(client_id, list) and client_id else client_id
-        captions = caption if isinstance(caption, list) else [caption]
-        first = next((c.strip() for c in captions if isinstance(c, str) and c.strip()), "")
-
-        if first and sid:
-            PromptServer.instance.send_sync("training.caption.sample", {"caption": first}, sid)
-
-        return {"ui": {}}
-
-
 class FantasioUNETLoader:
     @classmethod
     def INPUT_TYPES(cls):
@@ -777,8 +720,6 @@ NODE_CLASS_MAPPINGS = {
     "FantasioLoraLoader": FantasioLoraLoader,
     "FantasioLoadImageFromUrl": FantasioLoadImageFromUrl,
     "FantasioDownloadAndExtractArchive": FantasioDownloadAndExtractArchive,
-    "FantasioApplyTriggerWord": FantasioApplyTriggerWord,
-    "FantasioSampleCaptionEmitter": FantasioSampleCaptionEmitter,
     "FantasioUNETLoader": FantasioUNETLoader,
     "FantasioCLIPLoader": FantasioCLIPLoader,
     "FantasioVAELoader": FantasioVAELoader,
@@ -793,8 +734,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FantasioLoraLoader": "Fantasio LoRA Loader",
     "FantasioLoadImageFromUrl": "Fantasio Load Image From URL",
     "FantasioDownloadAndExtractArchive": "Fantasio Download And Extract Archive",
-    "FantasioApplyTriggerWord": "Fantasio Apply Trigger Word",
-    "FantasioSampleCaptionEmitter": "Fantasio Sample Caption Emitter",
     "FantasioUNETLoader": "Fantasio UNET Loader",
     "FantasioCLIPLoader": "Fantasio CLIP Loader",
     "FantasioVAELoader": "Fantasio VAE Loader",
